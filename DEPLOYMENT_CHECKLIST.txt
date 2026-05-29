@@ -1,0 +1,148 @@
+╔══════════════════════════════════════════════════════════════════╗
+║               BLEEEP — DEPLOYMENT CHECKLIST                      ║
+╚══════════════════════════════════════════════════════════════════╝
+
+Complete these steps IN ORDER. Each step tells you exactly what to do.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 1 — CREATE YOUR SUPABASE PROJECT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Go to https://supabase.com and sign in
+2. Click "New project"
+3. Give it a name (e.g. "bleeep") and set a database password
+4. Wait ~2 minutes for it to be ready
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 2 — RUN THE DATABASE SCHEMA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. In your Supabase project, click "SQL Editor" in the left sidebar
+2. Click "New Query"
+3. Open the file: puretune/supabase/schema.sql
+4. Copy its entire contents and paste it into the SQL editor
+5. Click "Run" (green button)
+6. You should see "Success. No rows returned"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 3 — GET YOUR SUPABASE API KEYS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. In Supabase, go to Settings → API (left sidebar)
+2. You'll see:
+   - "Project URL" → copy this → paste as NEXT_PUBLIC_SUPABASE_URL
+   - "anon public" key → copy → paste as NEXT_PUBLIC_SUPABASE_ANON_KEY
+   - "service_role secret" key → copy → paste as SUPABASE_SERVICE_ROLE_KEY
+   (WARNING: never share the service_role key publicly)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 4 — ENABLE GOOGLE LOGIN IN SUPABASE (optional)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Go to Authentication → Providers → Google
+2. Toggle it ON
+3. You'll need to create a Google OAuth app at:
+   https://console.cloud.google.com/apis/credentials
+4. Set the redirect URL to: https://your-project.supabase.co/auth/v1/callback
+5. Paste your Client ID and Client Secret into Supabase
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 5 — GET YOUR ASSEMBLYAI KEY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Go to https://assemblyai.com and sign up
+2. Go to your Dashboard → API Keys
+3. Copy your API key → paste as ASSEMBLYAI_API_KEY
+   (Free plan gives 100 hours of transcription — plenty to start)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 6 — SET UP STRIPE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Go to https://stripe.com and sign up
+2. In the Stripe dashboard, go to Developers → API Keys
+   - Copy "Publishable key" → NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY
+   - Copy "Secret key" → STRIPE_SECRET_KEY
+
+3. Create the Pro product:
+   - Go to Products → Add product
+   - Name: "Bleeep Pro"
+   - Click "Add pricing"
+   - Price: $12.00, Recurring: Monthly
+   - Click Save → copy the Price ID (starts with price_...)
+   - Paste as NEXT_PUBLIC_STRIPE_PRO_PRICE_ID
+
+4. Enable Stripe Customer Portal:
+   - Go to Settings → Billing → Customer Portal
+   - Toggle it on and click Save
+
+5. Set up the Stripe webhook (do this AFTER deploying to Vercel):
+   - Go to Developers → Webhooks → Add endpoint
+   - URL: https://your-app.vercel.app/api/stripe/webhook
+   - Events to listen for:
+     * checkout.session.completed
+     * customer.subscription.updated
+     * customer.subscription.deleted
+     * invoice.payment_failed
+   - Copy the "Signing secret" → STRIPE_WEBHOOK_SECRET
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 7 — TEST LOCALLY FIRST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Fill in your .env.local file with all the keys above
+2. Open Terminal, navigate to the bleeep folder:
+     cd ~/Desktop/puretune
+3. Run the development server:
+     npm run dev
+4. Open http://localhost:3000 in your browser
+5. Test signing up, uploading a song, and downloading
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 8 — DEPLOY TO VERCEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Option A — Using the Vercel CLI (recommended):
+1. Install Vercel CLI (one-time):
+     npm install -g vercel
+2. Run this command from the bleeep folder:
+     vercel
+3. Follow the prompts (link to existing account or create one)
+4. When asked for environment variables, add each one from .env.local
+
+Option B — Using the Vercel website:
+1. Push your code to GitHub (follow the instructions below)
+2. Go to https://vercel.com and sign in
+3. Click "Add New Project"
+4. Import your GitHub repository
+5. Before clicking Deploy, click "Environment Variables"
+6. Add each variable from your .env.local file
+7. Click Deploy
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 9 — POST-DEPLOYMENT STEPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Update NEXT_PUBLIC_APP_URL in Vercel env vars to your live URL
+   (e.g. https://bleeep.vercel.app)
+
+2. In Supabase → Authentication → URL Configuration:
+   - Add your Vercel URL to "Site URL"
+   - Add: https://your-app.vercel.app/** to "Redirect URLs"
+
+3. Go back to Stripe and set up the webhook pointing to your live URL
+   (see Step 6 above)
+
+4. Test a real payment using Stripe test card: 4242 4242 4242 4242
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 10 — MONTHLY USAGE RESET
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Free users get 3 songs/month. To reset the counter on the 1st of
+each month, run this in Supabase SQL Editor:
+
+   SELECT public.reset_monthly_usage();
+
+For automatic monthly resets, enable pg_cron in Supabase:
+Go to Database → Extensions → search "pg_cron" → Enable
+Then run:
+   SELECT cron.schedule(
+     'reset-monthly-usage',
+     '0 0 1 * *',
+     'SELECT public.reset_monthly_usage()'
+   );
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ALL DONE! Your app is live.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
