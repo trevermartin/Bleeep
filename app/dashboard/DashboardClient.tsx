@@ -34,6 +34,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
     cleanUrl: string
     wordsDetected: DetectedWord[]
     songId: string
+    detectionMethod: 'lyrics' | 'ai'
   } | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
 
@@ -136,6 +137,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
           cleanUrl: data.cleanUrl,
           wordsDetected: data.wordsDetected,
           songId: data.songId,
+          detectionMethod: data.detectionMethod ?? 'ai',
         })
 
         // Refresh song history
@@ -386,6 +388,15 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
               <h3 className="text-white font-semibold flex items-center gap-2">
                 <span className="w-2 h-2 bg-green-400 rounded-full" />
                 Processing complete
+                {result.detectionMethod === 'lyrics' ? (
+                  <span className="text-xs font-normal bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full">
+                    Lyrics-assisted
+                  </span>
+                ) : (
+                  <span className="text-xs font-normal bg-blue-500/20 text-blue-300 border border-blue-500/30 px-2 py-0.5 rounded-full">
+                    AI detection
+                  </span>
+                )}
               </h3>
               <a
                 href={result.cleanUrl}
