@@ -11,23 +11,44 @@ interface LrclibTrack {
 }
 
 /**
- * Extract artist and track name from a typical music filename.
- * Handles "Artist - Track Name.mp3" and plain "Track Name.mp3".
+ * Extract artist and track name from a music filename, stripping common
+ * noise suffixes before querying LRCLIB.
+ *
+ * Examples:
+ *   "Childish Gambino - Lithonia (Lyrics).mp3"  → { artist: "Childish Gambino", track: "Lithonia" }
+ *   "01 - Song Name [HD].mp3"                   → { artist: "",                  track: "Song Name" }
+ *   "Artist ft. Other - Track (Official).mp3"   → { artist: "Artist",            track: "Track" }
  */
 export function parseFilename(filename: string): { artist: string; track: string } {
-  const base = filename.replace(/\.[^.]+$/, '').trim()
+  let base = filename.replace(/\.[^.]+$/, '').trim()
+
+  // Remove all content inside parentheses or brackets — these are always metadata
+  // noise in music filenames: (Lyrics), [HD], (Official Video), (feat. X), etc.
+  base = base.replace(/\s*[\(\[][^\)\]]*[\)\]]/g, '').trim()
+
+  // Remove leading track numbers: "01 - ", "1. ", "02 "
+  base = base.replace(/^\d+\s*[\.\-]\s*/, '').trim()
+
+  // Collapse stray multiple spaces left behind by the removals
+  base = base.replace(/\s{2,}/g, ' ').trim()
+
+  // Split on first " - " separator for artist / track
   const idx = base.indexOf(' - ')
   if (idx > 0) {
-    return { artist: base.slice(0, idx).trim(), track: base.slice(idx + 3).trim() }
+    let artist = base.slice(0, idx).trim()
+    const track = base.slice(idx + 3).trim()
+
+    // Strip featured-artist suffixes from the artist field
+    artist = artist.replace(/\s+(feat\.?|ft\.?|with|&)\s+.*/i, '').trim()
+
+    return { artist, track }
   }
+
   return { artist: '', track: base }
 }
 
-/**
- * Query LRCLIB for synced (timestamped) lyrics.
- * Returns LRC text if a match with synced lyrics is found, otherwise null.
- */
-export async function fetchLrcLyrics(artist: string, track: string): Promise<string | null> {
+/** Single LRCLIB search call. Returns the first synced-lyrics hit or null. */
+async function searchLrclib(artist: string, track: string): Promise<string | null> {
   const params = new URLSearchParams({ track_name: track })
   if (artist) params.set('artist_name', artist)
 
@@ -41,6 +62,20 @@ export async function fetchLrcLyrics(artist: string, track: string): Promise<str
   const results: LrclibTrack[] = await res.json()
   const match = results.find((r) => r.syncedLyrics && r.syncedLyrics.trim().length > 0)
   return match?.syncedLyrics ?? null
+}
+
+/**
+ * Query LRCLIB for synced (timestamped) lyrics.
+ * First tries artist + track; if nothing is found, retries with track only
+ * in case the artist name didn't match LRCLIB's spelling.
+ */
+export async function fetchLrcLyrics(artist: string, track: string): Promise<string | null> {
+  if (artist) {
+    const result = await searchLrclib(artist, track)
+    if (result) return result
+  }
+  // Fallback: track name only
+  return searchLrclib('', track)
 }
 
 /**
@@ -68,9 +103,9 @@ export function parseLrc(lrcText: string): LrcLine[] {
 /**
  * Scan timestamped lyrics for profanity.
  *
- * Each flagged line is muted from 1s before its timestamp to 1s
- * after the next line's timestamp (covering the full phrase regardless
- * of where in the line the curse word falls).
+ * Each flagged line is muted from 0.5s before its timestamp to exactly
+ * the next line's start (covering the full phrase without spilling into
+ * the following clean line).
  */
 export function detectProfanityInLyrics(
   lines: LrcLine[],
@@ -89,7 +124,7 @@ export function detectProfanityInLyrics(
     const lineEnd =
       i + 1 < lines.length ? Math.min(lines[i + 1].time, line.time + 6.0) : line.time + 4.0
 
-    const start = Math.max(0, line.time - 0.75)
+    const start = Math.max(0, line.time - 0.5)
     const end = lineEnd
 
     for (const word of profaneWords) {
