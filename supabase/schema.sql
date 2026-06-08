@@ -101,7 +101,16 @@ create policy "Public audio read"
   on storage.objects for select
   using (bucket_id = 'audio');
 
--- ── 6. Indexes ──────────────────────────────────────────────
+-- ── 6. Table-level grants ────────────────────────────────────
+-- service_role bypasses RLS but still needs explicit GRANT on
+-- tables created after Supabase's initial setup.
+-- authenticated role needs grants for the RLS policies to fire.
+grant select, insert, update, delete on public.profiles to service_role;
+grant select, insert, update, delete on public.songs    to service_role;
+grant select, update                 on public.profiles to authenticated;
+grant select, insert, update         on public.songs    to authenticated;
+
+-- ── 7. Indexes ──────────────────────────────────────────────
 create index if not exists songs_user_id_idx on public.songs(user_id);
 create index if not exists songs_created_at_idx on public.songs(created_at desc);
 create index if not exists profiles_stripe_id_idx on public.profiles(stripe_customer_id);
