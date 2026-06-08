@@ -43,6 +43,12 @@ function getFfmpegPath(): string {
 // ── main handler ──────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
+  // Guard: catch missing env vars early with a clear message
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    console.error('[process] FATAL: SUPABASE_SERVICE_ROLE_KEY is not set')
+    return NextResponse.json({ error: 'Server misconfiguration: missing SUPABASE_SERVICE_ROLE_KEY' }, { status: 500 })
+  }
+
   const supabase = await createClient()
   const adminSupabase = createAdminClient()
 
@@ -64,6 +70,7 @@ export async function POST(request: NextRequest) {
     .single()
 
   if (!profile) {
+    console.log(`[process] No profile found for user ${user.id}, auto-creating...`)
     const { data: newProfile, error: insertErr } = await adminSupabase
       .from('profiles')
       .insert({ id: user.id, email: user.email ?? '', plan: 'free', songs_processed_this_month: 0 })
@@ -71,8 +78,13 @@ export async function POST(request: NextRequest) {
       .single()
 
     if (insertErr || !newProfile) {
-      return NextResponse.json({ error: 'Could not create user profile' }, { status: 500 })
+      console.error('[process] Profile insert failed:', insertErr?.code, insertErr?.message, insertErr?.details)
+      return NextResponse.json(
+        { error: `Could not create user profile: ${insertErr?.message ?? 'unknown error'} (code: ${insertErr?.code ?? 'none'})` },
+        { status: 500 }
+      )
     }
+    console.log(`[process] Profile created for user ${user.id}`)
     profile = newProfile
   }
 
