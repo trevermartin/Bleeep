@@ -247,6 +247,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
           originalUrl: pendingReview.originalUrl,
           originalFilename: pendingReview.originalFilename,
           // strip the client-side id before sending
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
           wordsDetected: pendingReview.words.map(({ id: _id, ...w }) => w),
         }),
         signal: controller.signal,
@@ -260,6 +261,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
         return
       }
 
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const finalWords = pendingReview.words.map(({ id: _id, ...w }) => w)
       setResult({
         cleanUrl: data.cleanUrl,
