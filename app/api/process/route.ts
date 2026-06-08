@@ -121,6 +121,7 @@ export async function POST(request: NextRequest) {
     originalUrl: string
     originalFilename: string
     muteType: string
+    manualLyrics?: string
   }
 
   try {
@@ -149,14 +150,28 @@ export async function POST(request: NextRequest) {
   })
 
   try {
-    // ── Step 6: Try LRCLIB first (fast path — no audio download needed) ──────
+    // ── Step 6: Detect profanity (manual lyrics → LRCLIB → AssemblyAI) ───────
     let detectedWords: DetectedWord[] = []
     let detectionMethod: 'lyrics' | 'ai' = 'ai'
+
+    // 6a. Manual lyrics pasted by the user — highest priority
+    const manualLyrics = body.manualLyrics
+    if (manualLyrics && manualLyrics.trim()) {
+      const lines = parseLrc(manualLyrics)
+      if (lines.length > 0) {
+        detectedWords = detectProfanityInLyrics(lines, muteType as 'mute' | 'bleep')
+        detectionMethod = 'lyrics'
+        console.log(`[process] Manual LRC: ${lines.length} lines, ${detectedWords.length} profane`)
+      } else {
+        console.log('[process] Manual lyrics provided but no LRC timestamps found — falling through')
+      }
+    }
 
     const parsed = parseFilename(originalFilename)
     console.log(`[process] Filename → artist="${parsed.artist}" track="${parsed.track}"`)
 
-    try {
+    // 6b. LRCLIB (if no manual lyrics)
+    if (detectionMethod === 'ai') try {
       const lrcText = await fetchLrcLyrics(parsed.artist, parsed.track)
       if (lrcText) {
         const lines = parseLrc(lrcText)
@@ -170,7 +185,7 @@ export async function POST(request: NextRequest) {
       console.warn('[process] LRCLIB failed — falling back to AssemblyAI:', lrcErr)
     }
 
-    // ── Step 7: AssemblyAI fallback (if no lyrics match) ─────────────────────
+    // ── Step 7: AssemblyAI fallback (if neither manual lyrics nor LRCLIB matched) ──
     if (detectionMethod === 'ai') {
       const assemblyApiKey = process.env.ASSEMBLYAI_API_KEY
       if (!assemblyApiKey) throw new Error('ASSEMBLYAI_API_KEY is not set')

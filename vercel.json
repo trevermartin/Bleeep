@@ -4,6 +4,10 @@
       "maxDuration": 300,
       "memory": 1024
     },
+    "app/api/reprocess/route.ts": {
+      "maxDuration": 300,
+      "memory": 1024
+    },
     "app/api/stripe/webhook/route.ts": {
       "maxDuration": 30
     }
