@@ -63,14 +63,25 @@ export async function POST(request: NextRequest) {
 
   // 2. Fetch profile — auto-create if missing (handles accounts that
   //    signed up before the on_auth_user_created trigger was deployed)
-  let { data: profile } = await adminSupabase
+  const { data: profile0, error: selectErr } = await adminSupabase
     .from('profiles')
     .select('*')
     .eq('id', user.id)
     .single()
 
+  if (selectErr && selectErr.code !== 'PGRST116') {
+    // PGRST116 = "no rows found" — anything else is a real DB/auth error
+    console.error('[process] Profile SELECT error:', selectErr.code, selectErr.message, selectErr.details)
+    return NextResponse.json(
+      { error: `Profile lookup failed: ${selectErr.message} (code: ${selectErr.code})` },
+      { status: 500 }
+    )
+  }
+
+  let profile = profile0
+
   if (!profile) {
-    console.log(`[process] No profile found for user ${user.id}, auto-creating...`)
+    console.log(`[process] No profile for user ${user.id} (${user.email}), auto-creating...`)
     const { data: newProfile, error: insertErr } = await adminSupabase
       .from('profiles')
       .insert({ id: user.id, email: user.email ?? '', plan: 'free', songs_processed_this_month: 0 })
@@ -78,13 +89,13 @@ export async function POST(request: NextRequest) {
       .single()
 
     if (insertErr || !newProfile) {
-      console.error('[process] Profile insert failed:', insertErr?.code, insertErr?.message, insertErr?.details)
+      console.error('[process] Profile INSERT failed:', insertErr?.code, insertErr?.message, insertErr?.details, insertErr?.hint)
       return NextResponse.json(
-        { error: `Could not create user profile: ${insertErr?.message ?? 'unknown error'} (code: ${insertErr?.code ?? 'none'})` },
+        { error: `Could not create user profile: ${insertErr?.message ?? 'unknown'} (code: ${insertErr?.code ?? 'none'})` },
         { status: 500 }
       )
     }
-    console.log(`[process] Profile created for user ${user.id}`)
+    console.log(`[process] Profile auto-created for user ${user.id}`)
     profile = newProfile
   }
 
