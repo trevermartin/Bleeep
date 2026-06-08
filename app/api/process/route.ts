@@ -55,15 +55,25 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  // 2. Check plan / usage limits
-  const { data: profile } = await adminSupabase
+  // 2. Fetch profile — auto-create if missing (handles accounts that
+  //    signed up before the on_auth_user_created trigger was deployed)
+  let { data: profile } = await adminSupabase
     .from('profiles')
     .select('*')
     .eq('id', user.id)
     .single()
 
   if (!profile) {
-    return NextResponse.json({ error: 'Profile not found' }, { status: 404 })
+    const { data: newProfile, error: insertErr } = await adminSupabase
+      .from('profiles')
+      .insert({ id: user.id, email: user.email ?? '', plan: 'free', songs_processed_this_month: 0 })
+      .select()
+      .single()
+
+    if (insertErr || !newProfile) {
+      return NextResponse.json({ error: 'Could not create user profile' }, { status: 500 })
+    }
+    profile = newProfile
   }
 
   const FREE_LIMIT = 3
