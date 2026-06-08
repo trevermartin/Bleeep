@@ -175,7 +175,7 @@ export async function POST(request: NextRequest) {
         audio_url: originalUrl,
         speech_models: ['universal-3-pro'],
         filter_profanity: false,
-        keyterms_prompt: WORD_BOOST.join(', '),
+        keyterms_prompt: WORD_BOOST,
       }),
     })
 
