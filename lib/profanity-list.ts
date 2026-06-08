@@ -70,6 +70,10 @@ export function isProfane(word: string): boolean {
  * Return all unique profane words found in a lyrics line.
  * Splits by whitespace so each token is tested as a whole word —
  * "bass" will never match "ass", "classic" will never match "ass", etc.
+ *
+ * Also detects censored variants that appear in lyrics databases:
+ * "f*ck", "motherf**ker", "n***a", etc. Converts asterisks to a wildcard
+ * regex and tests against clean (non-starred) entries in the profanity list.
  */
 export function extractProfaneWords(text: string): string[] {
   const seen = new Set<string>()
@@ -77,9 +81,24 @@ export function extractProfaneWords(text: string): string[] {
 
   for (const token of text.split(/\s+/)) {
     const cleaned = token.toLowerCase().replace(/[^a-z0-9*]/g, '')
-    if (cleaned && PROFANITY_LIST.includes(cleaned) && !seen.has(cleaned)) {
-      seen.add(cleaned)
-      result.push(cleaned)
+    if (!cleaned) continue
+
+    let matched: string | undefined
+
+    // Direct match (handles plain words and starred list entries like "f*ck")
+    if (PROFANITY_LIST.includes(cleaned)) {
+      matched = cleaned
+    } else if (cleaned.length >= 3 && cleaned.includes('*')) {
+      // Censored-variant match: replace runs of * with [a-z]* and test
+      // against the clean (no-asterisk) subset of the profanity list.
+      // e.g. "motherf**ker" → /^motherf[a-z]*ker$/ → matches "motherfucker"
+      const re = new RegExp('^' + cleaned.replace(/\*+/g, '[a-z]*') + '$')
+      matched = PROFANITY_LIST.find((p) => !p.includes('*') && re.test(p))
+    }
+
+    if (matched && !seen.has(matched)) {
+      seen.add(matched)
+      result.push(matched)
     }
   }
 

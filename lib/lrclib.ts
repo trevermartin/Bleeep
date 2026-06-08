@@ -83,12 +83,14 @@ export function detectProfanityInLyrics(
     const profaneWords = extractProfaneWords(line.text)
     if (profaneWords.length === 0) continue
 
-    // End of this line = start of next line (capped at +6s) or +4s if last line
+    // End of this line = start of next line (capped at +6s) or +4s if last line.
+    // No extra padding past lineEnd — adding +1s here was causing spillover into
+    // the first words of the following (clean) line.
     const lineEnd =
       i + 1 < lines.length ? Math.min(lines[i + 1].time, line.time + 6.0) : line.time + 4.0
 
-    const start = Math.max(0, line.time - 1.0)
-    const end = lineEnd + 1.0
+    const start = Math.max(0, line.time - 0.75)
+    const end = lineEnd
 
     for (const word of profaneWords) {
       detected.push({ word, start, end, mute_type: muteType })
