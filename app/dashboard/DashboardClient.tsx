@@ -4,7 +4,9 @@ import { useState, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
 import Link from 'next/link'
 import toast from 'react-hot-toast'
+import { v4 as uuidv4 } from 'uuid'
 import Navbar from '@/components/Navbar'
+import { createClient } from '@/lib/supabase/client'
 import type { Profile, Song, DetectedWord, ProcessingStatus, MuteType } from '@/types'
 
 interface Props {
@@ -21,6 +23,8 @@ const STAGE_LABELS: Record<ProcessingStatus['stage'], string> = {
   failed: 'Something went wrong.',
 }
 
+// 6-minute client-side timeout — covers AssemblyAI + ffmpeg for long songs
+const PROCESS_TIMEOUT_MS = 6 * 60 * 1000
 
 export default function DashboardClient({ profile, initialSongs, userEmail }: Props) {
   const [songs, setSongs] = useState<Song[]>(initialSongs)
@@ -42,29 +46,73 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
     async (acceptedFiles: File[]) => {
       const file = acceptedFiles[0]
       if (!file) return
-
       if (atLimit) {
-        toast.error('You\'ve reached your free limit. Upgrade to Pro!')
+        toast.error("You've reached your free limit. Upgrade to Pro!")
         return
       }
 
       setResult(null)
       setIsProcessing(true)
-      setStatus({ stage: 'uploading', message: STAGE_LABELS.uploading, progress: 15 })
 
-      const formData = new FormData()
-      formData.append('file', file)
-      formData.append('muteType', muteType)
+      const supabase = createClient()
+      const abortController = new AbortController()
+
+      // Auto-cancel after PROCESS_TIMEOUT_MS
+      const timeoutId = setTimeout(() => {
+        abortController.abort()
+      }, PROCESS_TIMEOUT_MS)
 
       try {
-        setStatus({ stage: 'analyzing', message: STAGE_LABELS.analyzing, progress: 50 })
+        // ── Step 1: get the current user ─────────────────────────────────────
+        const {
+          data: { user },
+        } = await supabase.auth.getUser()
+
+        if (!user) {
+          throw new Error('You must be logged in. Please refresh the page.')
+        }
+
+        // ── Step 2: upload directly to Supabase Storage from the browser ─────
+        // This bypasses Vercel's 4.5MB request body limit entirely.
+        setStatus({ stage: 'uploading', message: STAGE_LABELS.uploading, progress: 10 })
+
+        const songId = uuidv4()
+        const ext = file.name.toLowerCase().endsWith('.wav') ? '.wav' : '.mp3'
+        const storagePath = `originals/${user.id}/${songId}${ext}`
+
+        const { error: uploadError } = await supabase.storage
+          .from('audio')
+          .upload(storagePath, file, {
+            contentType: file.type || 'audio/mpeg',
+            upsert: false,
+          })
+
+        if (uploadError) {
+          throw new Error(`Upload failed: ${uploadError.message}`)
+        }
+
+        const { data: urlData } = supabase.storage
+          .from('audio')
+          .getPublicUrl(storagePath)
+
+        const originalUrl = urlData.publicUrl
+
+        // ── Step 3: call the API with just the URL (tiny JSON payload) ───────
+        setStatus({ stage: 'analyzing', message: STAGE_LABELS.analyzing, progress: 30 })
 
         const res = await fetch('/api/process', {
           method: 'POST',
-          body: formData,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            songId,
+            originalUrl,
+            originalFilename: file.name,
+            muteType,
+          }),
+          signal: abortController.signal,
         })
 
-        setStatus({ stage: 'processing', message: STAGE_LABELS.processing, progress: 85 })
+        setStatus({ stage: 'processing', message: STAGE_LABELS.processing, progress: 80 })
 
         const data = await res.json()
 
@@ -72,13 +120,17 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
           if (data.upgrade) {
             toast.error('Monthly limit reached. Upgrade to Pro for unlimited songs.')
           } else {
-            toast.error(data.error || 'Processing failed')
+            toast.error(data.error || 'Processing failed. Please try again.')
           }
-          setStatus({ stage: 'failed', message: data.error || 'Processing failed', progress: 0 })
-          setIsProcessing(false)
+          setStatus({
+            stage: 'failed',
+            message: data.error || 'Processing failed',
+            progress: 0,
+          })
           return
         }
 
+        // ── Step 4: success ───────────────────────────────────────────────────
         setStatus({ stage: 'complete', message: STAGE_LABELS.complete, progress: 100 })
         setResult({
           cleanUrl: data.cleanUrl,
@@ -86,7 +138,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
           songId: data.songId,
         })
 
-        // Refresh songs list
+        // Refresh song history
         const refreshRes = await fetch('/api/songs')
         if (refreshRes.ok) {
           const refreshData = await refreshRes.json()
@@ -95,14 +147,23 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
 
         toast.success(
           data.wordCount === 0
-            ? 'No profanity detected! Your song is already clean.'
+            ? 'No profanity detected — your song is already clean!'
             : `Found and removed ${data.wordCount} word${data.wordCount !== 1 ? 's' : ''}.`
         )
       } catch (err) {
-        console.error(err)
-        toast.error('An unexpected error occurred. Please try again.')
-        setStatus({ stage: 'failed', message: 'Unexpected error', progress: 0 })
+        if (err instanceof Error && err.name === 'AbortError') {
+          toast.error(
+            'Processing timed out. This can happen with very long songs. Please try again.'
+          )
+          setStatus({ stage: 'failed', message: 'Timed out — please try again', progress: 0 })
+        } else {
+          const message = err instanceof Error ? err.message : 'An unexpected error occurred.'
+          console.error('[onDrop]', err)
+          toast.error(message)
+          setStatus({ stage: 'failed', message, progress: 0 })
+        }
       } finally {
+        clearTimeout(timeoutId)
         setIsProcessing(false)
       }
     },
@@ -122,7 +183,8 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
     onDropRejected: (files) => {
       const err = files[0]?.errors[0]
       if (err?.code === 'file-too-large') toast.error('File too large. Max 50MB.')
-      else if (err?.code === 'file-invalid-type') toast.error('Only MP3 and WAV files are supported.')
+      else if (err?.code === 'file-invalid-type')
+        toast.error('Only MP3 and WAV files are supported.')
       else toast.error('Invalid file.')
     },
   })
@@ -170,7 +232,9 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                 <div className="w-32 h-1.5 bg-white/10 rounded-full overflow-hidden">
                   <div
                     className="h-full bg-violet-600 rounded-full transition-all"
-                    style={{ width: `${Math.min((usedThisMonth / FREE_LIMIT) * 100, 100)}%` }}
+                    style={{
+                      width: `${Math.min((usedThisMonth / FREE_LIMIT) * 100, 100)}%`,
+                    }}
                   />
                 </div>
                 {atLimit && (
@@ -242,19 +306,60 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                     <span>Ready</span>
                   </div>
                 </div>
+                <p className="text-white/30 text-xs mt-3">
+                  This can take 1–3 minutes depending on song length
+                </p>
+              </div>
+            ) : status?.stage === 'failed' ? (
+              <div>
+                <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center mx-auto mb-4">
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={1.5}
+                    className="w-8 h-8 text-red-400"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
+                    />
+                  </svg>
+                </div>
+                <p className="text-red-400 font-medium mb-1">Processing failed</p>
+                <p className="text-white/40 text-sm mb-4">{status.message}</p>
+                <button
+                  onClick={() => setStatus(null)}
+                  className="text-violet-400 text-sm hover:text-violet-300 underline"
+                >
+                  Try again
+                </button>
               </div>
             ) : (
               <div>
                 <div className="w-16 h-16 rounded-2xl bg-violet-600/20 flex items-center justify-center mx-auto mb-4">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-8 h-8 text-violet-400">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={1.5}
+                    className="w-8 h-8 text-violet-400"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"
+                    />
                   </svg>
                 </div>
                 {atLimit ? (
                   <>
                     <p className="text-white font-medium mb-1">Monthly limit reached</p>
                     <p className="text-white/40 text-sm">
-                      <Link href="/pricing" className="text-violet-400 hover:underline">Upgrade to Pro</Link>{' '}
+                      <Link href="/pricing" className="text-violet-400 hover:underline">
+                        Upgrade to Pro
+                      </Link>{' '}
                       for unlimited songs
                     </p>
                   </>
@@ -262,11 +367,10 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                   <p className="text-violet-300 font-medium">Drop your song here!</p>
                 ) : (
                   <>
-                    <p className="text-white font-medium mb-1">
-                      Drag & drop your song here
-                    </p>
+                    <p className="text-white font-medium mb-1">Drag & drop your song here</p>
                     <p className="text-white/40 text-sm">
-                      or <span className="text-violet-400">click to browse</span> — MP3 or WAV, up to 50MB
+                      or <span className="text-violet-400">click to browse</span> — MP3 or WAV,
+                      up to 50MB
                     </p>
                   </>
                 )}
@@ -289,7 +393,11 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                 className="bg-violet-600 hover:bg-violet-700 text-white font-medium px-5 py-2.5 rounded-xl text-sm transition-colors flex items-center gap-2"
               >
                 <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                  <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
+                  <path
+                    fillRule="evenodd"
+                    d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+                    clipRule="evenodd"
+                  />
                 </svg>
                 Download clean version
               </a>
@@ -302,13 +410,17 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
             ) : (
               <>
                 <p className="text-white/50 text-sm mb-3">
-                  {result.wordsDetected.length} word{result.wordsDetected.length !== 1 ? 's' : ''} detected and {muteType === 'mute' ? 'muted' : 'bleeped'}:
+                  {result.wordsDetected.length} word
+                  {result.wordsDetected.length !== 1 ? 's' : ''} detected and{' '}
+                  {muteType === 'mute' ? 'muted' : 'bleeped'}:
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {result.wordsDetected.map((w, i) => (
                     <div key={i} className="flex items-center gap-3 bg-white/5 rounded-lg px-4 py-2.5">
                       <span className="text-red-400 font-mono text-sm font-bold">
-                        {w.word[0]}{'*'.repeat(Math.max(1, w.word.length - 2))}{w.word.length > 1 ? w.word.slice(-1) : ''}
+                        {w.word[0]}
+                        {'*'.repeat(Math.max(1, w.word.length - 2))}
+                        {w.word.length > 1 ? w.word.slice(-1) : ''}
                       </span>
                       <span className="text-white/40 text-xs">{formatTime(w.start)}</span>
                       <span className="ml-auto text-xs bg-violet-600/30 text-violet-300 px-2 py-0.5 rounded capitalize">
@@ -361,7 +473,11 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                             title="Download"
                           >
                             <svg viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
-                              <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
+                              <path
+                                fillRule="evenodd"
+                                d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+                                clipRule="evenodd"
+                              />
                             </svg>
                           </a>
                         )}
@@ -384,8 +500,18 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
 
         {songs.length === 0 && !isProcessing && !result && (
           <div className="text-center py-12 text-white/30">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1} className="w-12 h-12 mx-auto mb-3 opacity-50">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 9l10.5-3m0 6.553v3.75a2.25 2.25 0 01-1.632 2.163l-1.32.377a1.803 1.803 0 11-.99-3.467l2.31-.66a2.25 2.25 0 001.632-2.163zm0 0V2.25L9 5.25v10.303m0 0v3.75a2.25 2.25 0 01-1.632 2.163l-1.32.377a1.803 1.803 0 01-.99-3.467l2.31-.66A2.25 2.25 0 009 15.553z" />
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1}
+              className="w-12 h-12 mx-auto mb-3 opacity-50"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M9 9l10.5-3m0 6.553v3.75a2.25 2.25 0 01-1.632 2.163l-1.32.377a1.803 1.803 0 11-.99-3.467l2.31-.66a2.25 2.25 0 001.632-2.163zm0 0V2.25L9 5.25v10.303m0 0v3.75a2.25 2.25 0 01-1.632 2.163l-1.32.377a1.803 1.803 0 01-.99-3.467l2.31-.66A2.25 2.25 0 009 15.553z"
+              />
             </svg>
             <p className="text-sm">No songs yet. Upload one above to get started.</p>
           </div>
