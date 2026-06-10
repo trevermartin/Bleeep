@@ -100,11 +100,28 @@ export default function WaveformReview({
   const addModeRef = useRef(false)
   const [expanded, setExpanded] = useState(false)
 
+  // Mute-preview toggle (ON = silenced during regions; OFF = hear original)
+  const [mutePreviewEnabled, setMutePreviewEnabled] = useState(true)
+  const mutePreviewEnabledRef = useRef(true)
+  useEffect(() => { mutePreviewEnabledRef.current = mutePreviewEnabled }, [mutePreviewEnabled])
+
+  // Scheduled gain changes — stored so they can be cancelled on pause/seek
+  const gainTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  // Exposed by the WaveSurfer init closure so the toggle button can call it
+  const scheduleMutesRef = useRef<((fromTime: number) => void) | null>(null)
+
   const [newWordTime, setNewWordTime] = useState('')
   const [newWordText, setNewWordText] = useState('')
 
   // Keep refs current so closures inside event handlers always see the latest values
-  useEffect(() => { wordsRef.current = words }, [words])
+  useEffect(() => {
+    wordsRef.current = words
+    // If playing, reschedule mutes because region positions may have changed
+    if (wsRef.current && isPlaying && !previewCleanupRef.current) {
+      scheduleMutesRef.current?.(wsRef.current.getCurrentTime())
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [words])
   useEffect(() => { onWordsChangeRef.current = onWordsChange }, [onWordsChange])
   useEffect(() => { muteTypeRef.current = muteType }, [muteType])
   useEffect(() => { addModeRef.current = addMode }, [addMode])
@@ -166,6 +183,36 @@ export default function WaveformReview({
         wsRef.current = ws
         regionsRef.current = wsRegions
 
+        // ── Precise mute scheduling via setTimeout ─────────────────────────────
+        // Much more accurate than audioprocess polling (~4ms vs ~50ms jitter).
+        // Schedule a setVolume(0) + setVolume(1) pair for every mute region,
+        // timed relative to the current playback position.
+        const scheduleMutes = (fromTime: number) => {
+          gainTimeoutsRef.current.forEach(clearTimeout)
+          gainTimeoutsRef.current = []
+          // Skip when mute preview is disabled or a per-word preview owns volume
+          if (!mutePreviewEnabledRef.current || previewCleanupRef.current) return
+
+          for (const word of wordsRef.current) {
+            const startMs = (word.start - fromTime) * 1000
+            const endMs = (word.end - fromTime) * 1000
+            if (endMs <= 0) continue // already past end
+
+            if (startMs <= 0) {
+              // Playback started inside a mute zone — silence immediately
+              ws.setVolume(0)
+            } else {
+              gainTimeoutsRef.current.push(
+                setTimeout(() => { if (!previewCleanupRef.current) ws.setVolume(0) }, startMs)
+              )
+            }
+            gainTimeoutsRef.current.push(
+              setTimeout(() => { if (!previewCleanupRef.current) ws.setVolume(1) }, endMs)
+            )
+          }
+        }
+        scheduleMutesRef.current = scheduleMutes
+
         ws.on('ready', (dur: number) => {
           if (destroyed) return
           setDuration(dur)
@@ -186,14 +233,30 @@ export default function WaveformReview({
         ws.on('error', (err: Error) => {
           if (!destroyed) setLoadError(err?.message ?? 'Failed to load audio')
         })
+
         ws.on('play', () => {
-          if (!destroyed) { setIsPlaying(true); isInMuteZoneRef.current = false }
+          if (!destroyed) {
+            setIsPlaying(true)
+            isInMuteZoneRef.current = false
+            scheduleMutes(ws.getCurrentTime())
+          }
         })
-        ws.on('pause', () => { if (!destroyed) setIsPlaying(false) })
+
+        ws.on('pause', () => {
+          if (!destroyed) {
+            setIsPlaying(false)
+            gainTimeoutsRef.current.forEach(clearTimeout)
+            gainTimeoutsRef.current = []
+            if (!previewCleanupRef.current) ws.setVolume(1)
+          }
+        })
+
         ws.on('finish', () => {
           if (!destroyed) {
             setIsPlaying(false)
             setActiveWordId(null)
+            gainTimeoutsRef.current.forEach(clearTimeout)
+            gainTimeoutsRef.current = []
             ws.setVolume(1)
             isInMuteZoneRef.current = false
           }
@@ -204,14 +267,7 @@ export default function WaveformReview({
           setCurrentTime(time)
           const active = wordsRef.current.find((w) => time >= w.start && time <= w.end)
           setActiveWordId(active?.id ?? null)
-          // Real-time mute: only change volume on zone transitions
-          if (!previewCleanupRef.current) {
-            const inZone = !!active
-            if (inZone !== isInMuteZoneRef.current) {
-              isInMuteZoneRef.current = inZone
-              ws.setVolume(inZone ? 0 : 1)
-            }
-          }
+          // Volume is managed by scheduled timeouts above, not by polling here
         })
 
         // region-updated fires once on mouse-up after drag/resize
@@ -242,9 +298,12 @@ export default function WaveformReview({
           requestAnimationFrame(() => { regionJustClickedRef.current = false })
         })
 
-        // Click-to-add-region mode
+        // Click-to-add-region mode + reschedule mutes on seek
         ws.on('interaction', (time: number) => {
-          if (destroyed || !addModeRef.current || regionJustClickedRef.current) return
+          if (destroyed) return
+          // Reschedule mutes from the new seek position
+          scheduleMutes(time)
+          if (!addModeRef.current || regionJustClickedRef.current) return
           const snap = wordsRef.current.map((w) => ({ ...w }))
           historyRef.current = [...historyRef.current.slice(-19), snap]
           setHistoryLength(historyRef.current.length)
@@ -278,6 +337,9 @@ export default function WaveformReview({
 
     return () => {
       destroyed = true
+      gainTimeoutsRef.current.forEach(clearTimeout)
+      gainTimeoutsRef.current = []
+      scheduleMutesRef.current = null
       previewCleanupRef.current?.()
       if (wsRef.current) {
         wsRef.current.destroy()
@@ -558,6 +620,41 @@ export default function WaveformReview({
           )}
 
           <div className="flex-1" />
+
+          {/* Mute preview ON/OFF pill toggle */}
+          {isLoaded && (
+            <button
+              onClick={() => {
+                setMutePreviewEnabled((prev) => {
+                  const next = !prev
+                  mutePreviewEnabledRef.current = next
+                  if (!next) {
+                    // Turning off — cancel scheduled mutes and restore volume
+                    gainTimeoutsRef.current.forEach(clearTimeout)
+                    gainTimeoutsRef.current = []
+                    if (!previewCleanupRef.current) wsRef.current?.setVolume(1)
+                  } else if (isPlaying && !previewCleanupRef.current) {
+                    // Turning on mid-playback — reschedule from current position
+                    scheduleMutesRef.current?.(wsRef.current?.getCurrentTime() ?? 0)
+                  }
+                  return next
+                })
+              }}
+              title={mutePreviewEnabled
+                ? 'Mute preview ON — click to hear original audio'
+                : 'Mute preview OFF — click to silence profanity during playback'}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all border shrink-0 ${
+                mutePreviewEnabled
+                  ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25'
+                  : 'bg-white/5 border-white/15 text-white/35 hover:bg-white/10 hover:text-white/60'
+              }`}
+            >
+              <span className={`w-2 h-2 rounded-full transition-colors shrink-0 ${
+                mutePreviewEnabled ? 'bg-emerald-400' : 'bg-white/20'
+              }`} />
+              Mute: {mutePreviewEnabled ? 'ON' : 'OFF'}
+            </button>
+          )}
 
           {/* Undo button */}
           {isLoaded && (
