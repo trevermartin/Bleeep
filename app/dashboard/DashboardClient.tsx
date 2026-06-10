@@ -5,12 +5,13 @@ import { useDropzone } from 'react-dropzone'
 import Link from 'next/link'
 import toast from 'react-hot-toast'
 import { v4 as uuidv4 } from 'uuid'
+import dynamic from 'next/dynamic'
 import Navbar from '@/components/Navbar'
 import { createClient } from '@/lib/supabase/client'
 import type { Profile, Song, DetectedWord, ProcessingStatus, MuteType } from '@/types'
+import type { ReviewWord } from '@/components/WaveformReview'
 
-// Extends DetectedWord with a client-side id for the review UI
-type ReviewWord = DetectedWord & { id: string }
+const WaveformReview = dynamic(() => import('@/components/WaveformReview'), { ssr: false })
 
 interface Props {
   profile: Profile | null
@@ -27,14 +28,6 @@ const STAGE_LABELS: Record<ProcessingStatus['stage'], string> = {
 }
 
 const PROCESS_TIMEOUT_MS = 6 * 60 * 1000
-
-/** Parse "1:23", "1:23.4", or plain seconds "83.5" into seconds. */
-function parseTimeInput(input: string): number {
-  const clean = input.trim()
-  const m = clean.match(/^(\d+):(\d+(?:\.\d+)?)$/)
-  if (m) return parseInt(m[1], 10) * 60 + parseFloat(m[2])
-  return parseFloat(clean)
-}
 
 function censorDisplay(word: string): string {
   if (word.length <= 1) return '*'
@@ -62,8 +55,6 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
     detectionMethod: 'lyrics' | 'ai'
   } | null>(null)
   const [isReprocessing, setIsReprocessing] = useState(false)
-  const [newWordTime, setNewWordTime] = useState('')
-  const [newWordText, setNewWordText] = useState('')
 
   // ── Manual lyrics state ─────────────────────────────────────────────────────
   const [lyricsInput, setLyricsInput] = useState('')
@@ -185,51 +176,9 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
   )
 
   // ── Review actions ──────────────────────────────────────────────────────────
-  const nudgeWord = (id: string, delta: number) => {
-    setPendingReview((prev) => {
-      if (!prev) return prev
-      return {
-        ...prev,
-        words: prev.words.map((w) =>
-          w.id === id
-            ? { ...w, start: Math.max(0, w.start + delta), end: Math.max(0, w.end + delta) }
-            : w
-        ),
-      }
-    })
-  }
-
-  const removeWord = (id: string) => {
-    setPendingReview((prev) => {
-      if (!prev) return prev
-      return { ...prev, words: prev.words.filter((w) => w.id !== id) }
-    })
-  }
-
-  const addWord = () => {
-    if (!pendingReview || !newWordText.trim()) return
-    const t = parseTimeInput(newWordTime)
-    if (isNaN(t)) {
-      toast.error('Enter a valid time like 1:23 or 83')
-      return
-    }
-    const newWord: ReviewWord = {
-      id: uuidv4(),
-      word: newWordText.trim().toLowerCase(),
-      start: Math.max(0, t - 1.0),
-      end: t + 1.0,
-      mute_type: muteType,
-    }
-    setPendingReview((prev) => {
-      if (!prev) return prev
-      return {
-        ...prev,
-        words: [...prev.words, newWord].sort((a, b) => a.start - b.start),
-      }
-    })
-    setNewWordTime('')
-    setNewWordText('')
-  }
+  const handleWordsChange = useCallback((newWords: ReviewWord[]) => {
+    setPendingReview((prev) => prev ? { ...prev, words: newWords } : prev)
+  }, [])
 
   const handleConfirm = async () => {
     if (!pendingReview) return
@@ -549,135 +498,19 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
           </div>
         )}
 
-        {/* Review screen — shown between processing and download */}
+        {/* Review screen — waveform-based, shown between processing and download */}
         {pendingReview && (
-          <div className="mb-8 glass rounded-2xl p-6 animate-fade-in">
-            {/* Header row */}
-            <div className="flex items-start justify-between mb-5">
-              <div>
-                <h3 className="text-white font-semibold flex items-center gap-2">
-                  Review detected words
-                  {pendingReview.detectionMethod === 'lyrics' ? (
-                    <span className="text-xs font-normal bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full">
-                      Lyrics-assisted
-                    </span>
-                  ) : (
-                    <span className="text-xs font-normal bg-blue-500/20 text-blue-300 border border-blue-500/30 px-2 py-0.5 rounded-full">
-                      AI detection
-                    </span>
-                  )}
-                </h3>
-                <p className="text-white/40 text-sm mt-1">
-                  Nudge timing, remove false positives, or add missed words — then process.
-                </p>
-              </div>
-
-              <button
-                onClick={handleConfirm}
-                disabled={isReprocessing}
-                className="shrink-0 bg-violet-600 hover:bg-violet-700 disabled:opacity-60 text-white font-medium px-5 py-2.5 rounded-xl text-sm transition-colors flex items-center gap-2 ml-4"
-              >
-                {isReprocessing ? (
-                  <>
-                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    Processing…
-                  </>
-                ) : (
-                  'Process audio →'
-                )}
-              </button>
-            </div>
-
-            {/* Word list */}
-            {pendingReview.words.length === 0 ? (
-              <div className="text-center py-6 text-white/40 text-sm">
-                No words to mute — the song appears clean.{' '}
-                <button
-                  onClick={handleConfirm}
-                  disabled={isReprocessing}
-                  className="text-violet-400 hover:text-violet-300 underline"
-                >
-                  Confirm and download original
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-2 mb-5">
-                {pendingReview.words.map((w) => (
-                  <div
-                    key={w.id}
-                    className="flex items-center gap-2 bg-white/5 rounded-lg px-3 py-2"
-                  >
-                    {/* Censored word */}
-                    <span className="text-red-400 font-mono text-sm font-bold w-20 shrink-0">
-                      {censorDisplay(w.word)}
-                    </span>
-
-                    {/* Timestamp range */}
-                    <span className="text-white/30 text-xs font-mono w-28 shrink-0">
-                      {formatTime(w.start)} → {formatTime(w.end)}
-                    </span>
-
-                    {/* Nudge + remove */}
-                    <div className="flex items-center gap-1 ml-auto">
-                      <button
-                        onClick={() => nudgeWord(w.id, -0.5)}
-                        title="Shift 0.5s earlier"
-                        className="text-xs bg-white/10 hover:bg-white/20 text-white/60 hover:text-white px-2 py-1 rounded transition-colors"
-                      >
-                        ← 0.5s
-                      </button>
-                      <button
-                        onClick={() => nudgeWord(w.id, 0.5)}
-                        title="Shift 0.5s later"
-                        className="text-xs bg-white/10 hover:bg-white/20 text-white/60 hover:text-white px-2 py-1 rounded transition-colors"
-                      >
-                        0.5s →
-                      </button>
-                      <button
-                        onClick={() => removeWord(w.id)}
-                        title="Remove (false positive)"
-                        className="w-7 h-7 flex items-center justify-center rounded bg-red-500/10 hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors ml-1 text-base leading-none"
-                      >
-                        ×
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Add missed word */}
-            <div className="border-t border-white/10 pt-4">
-              <p className="text-white/30 text-xs mb-2">Add a missed word</p>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={newWordTime}
-                  onChange={(e) => setNewWordTime(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && addWord()}
-                  placeholder="1:23"
-                  className="w-20 bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-white text-xs font-mono focus:outline-none focus:border-violet-500/50"
-                />
-                <input
-                  type="text"
-                  value={newWordText}
-                  onChange={(e) => setNewWordText(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && addWord()}
-                  placeholder="word"
-                  className="flex-1 bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-white text-xs focus:outline-none focus:border-violet-500/50"
-                />
-                <button
-                  onClick={addWord}
-                  className="text-xs bg-violet-600/30 hover:bg-violet-600/50 text-violet-300 border border-violet-500/30 px-3 py-1.5 rounded-lg transition-colors"
-                >
-                  + Add
-                </button>
-              </div>
-              <p className="text-white/20 text-xs mt-1.5">
-                Timestamp format: 1:23 or 83 (seconds). Window is ±1s around the timestamp.
-              </p>
-            </div>
-          </div>
+          <WaveformReview
+            audioUrl={pendingReview.originalUrl}
+            originalFilename={pendingReview.originalFilename}
+            words={pendingReview.words}
+            detectionMethod={pendingReview.detectionMethod}
+            muteType={muteType}
+            isReprocessing={isReprocessing}
+            onWordsChange={handleWordsChange}
+            onConfirm={handleConfirm}
+            onCancel={() => { setPendingReview(null); setStatus(null) }}
+          />
         )}
 
         {/* Download result */}
