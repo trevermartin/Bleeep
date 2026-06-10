@@ -72,12 +72,20 @@ export default function WaveformReview({
   const onWordsChangeRef = useRef(onWordsChange)
   const muteTypeRef = useRef(muteType)
   const durationRef = useRef(0)
-  // Prevent programmatic setOptions() from echoing back through region-updated
-  const programmaticRef = useRef(false)
-  // Prevent interaction event from adding a region when user clicked an existing one
-  const regionJustClickedRef = useRef(false)
-  // Track whether playhead is currently inside a mute zone (avoids spamming setVolume)
-  const isInMuteZoneRef = useRef(false)
+  const programmaticRef = useRef(false)   // guard: setOptions() shouldn't fire region-updated
+  const regionJustClickedRef = useRef(false) // guard: region click shouldn't also add a region
+  const isInMuteZoneRef = useRef(false)   // track mute-zone transitions for real-time mute
+
+  // ── Initial word positions — snapshot at mount for copy/paste offset calc
+  const initialWordsRef = useRef<ReviewWord[]>(words)
+
+  // ── Undo history stack (up to 20 states)
+  const historyRef = useRef<ReviewWord[][]>([])
+  const [historyLength, setHistoryLength] = useState(0)
+
+  // ── Copy/paste clipboard
+  const [copiedDelta, setCopiedDelta] = useState<number | null>(null)
+  const [copiedFromId, setCopiedFromId] = useState<string | null>(null)
 
   const [isPlaying, setIsPlaying] = useState(false)
   const [isLoaded, setIsLoaded] = useState(false)
@@ -87,10 +95,9 @@ export default function WaveformReview({
   const [duration, setDuration] = useState(0)
   const [previewWordId, setPreviewWordId] = useState<string | null>(null)
   const previewCleanupRef = useRef<(() => void) | null>(null)
-  // Add-region mode: clicking the waveform creates a new 0.5s region
+
   const [addMode, setAddMode] = useState(false)
   const addModeRef = useRef(false)
-  // Expand waveform height
   const [expanded, setExpanded] = useState(false)
 
   const [newWordTime, setNewWordTime] = useState('')
@@ -101,6 +108,33 @@ export default function WaveformReview({
   useEffect(() => { onWordsChangeRef.current = onWordsChange }, [onWordsChange])
   useEffect(() => { muteTypeRef.current = muteType }, [muteType])
   useEffect(() => { addModeRef.current = addMode }, [addMode])
+
+  // ── Shared push-to-history used by all mutating functions ─────────────────
+  // Inlined at call sites for event-handler closures (where the function ref
+  // would be stale). Regular component functions call this helper directly.
+  function pushHistory(snapshot: ReviewWord[]) {
+    const next = [...historyRef.current.slice(-19), snapshot.map((w) => ({ ...w }))]
+    historyRef.current = next
+    setHistoryLength(next.length) // setState setter is always stable
+  }
+
+  // ── Rebuild all waveform regions from a word list (used by undo) ──────────
+  function rebuildRegions(wordList: ReviewWord[]) {
+    if (!regionsRef.current) return
+    // Remove all existing regions
+    Array.from(regionMapRef.current.values()).forEach((r) => r.remove())
+    regionMapRef.current.clear()
+    wordList.forEach((word) => {
+      const region = regionsRef.current.addRegion({
+        start: word.start,
+        end: word.end,
+        color: REGION_COLOR,
+        drag: true,
+        resize: true,
+      })
+      regionMapRef.current.set(word.id, region)
+    })
+  }
 
   // ── WaveSurfer init ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -137,8 +171,6 @@ export default function WaveformReview({
           setDuration(dur)
           durationRef.current = dur
           setIsLoaded(true)
-
-          // Add one draggable/resizable region per flagged word
           wordsRef.current.forEach((word) => {
             const region = wsRegions.addRegion({
               start: word.start,
@@ -155,17 +187,13 @@ export default function WaveformReview({
           if (!destroyed) setLoadError(err?.message ?? 'Failed to load audio')
         })
         ws.on('play', () => {
-          if (!destroyed) {
-            setIsPlaying(true)
-            isInMuteZoneRef.current = false // reset so first-region entry is detected
-          }
+          if (!destroyed) { setIsPlaying(true); isInMuteZoneRef.current = false }
         })
         ws.on('pause', () => { if (!destroyed) setIsPlaying(false) })
         ws.on('finish', () => {
           if (!destroyed) {
             setIsPlaying(false)
             setActiveWordId(null)
-            // Restore volume in case the song ended while muted
             ws.setVolume(1)
             isInMuteZoneRef.current = false
           }
@@ -174,13 +202,9 @@ export default function WaveformReview({
         ws.on('audioprocess', (time: number) => {
           if (destroyed) return
           setCurrentTime(time)
-
           const active = wordsRef.current.find((w) => time >= w.start && time <= w.end)
           setActiveWordId(active?.id ?? null)
-
-          // ── Real-time mute: silence volume when playhead is inside any flagged region.
-          // Only change volume on zone transitions (not every tick) to avoid audio glitches.
-          // Skip when a per-word preview is running (it manages volume itself).
+          // Real-time mute: only change volume on zone transitions
           if (!previewCleanupRef.current) {
             const inZone = !!active
             if (inZone !== isInMuteZoneRef.current) {
@@ -190,12 +214,16 @@ export default function WaveformReview({
           }
         })
 
-        // region-updated fires once when the user finishes dragging or resizing
+        // region-updated fires once on mouse-up after drag/resize
         wsRegions.on('region-updated', (region: any) => {
           if (destroyed || programmaticRef.current) return
           const entries = Array.from(regionMapRef.current.entries())
           for (const [wordId, r] of entries) {
             if (r === region || r.id === region.id) {
+              // Push history before applying the drag (setHistoryLength setter is stable)
+              const snap = wordsRef.current.map((w) => ({ ...w }))
+              historyRef.current = [...historyRef.current.slice(-19), snap]
+              setHistoryLength(historyRef.current.length)
               onWordsChangeRef.current(
                 wordsRef.current.map((w) =>
                   w.id === wordId
@@ -208,15 +236,18 @@ export default function WaveformReview({
           }
         })
 
-        // Track region clicks so we can skip region-creation when clicking an existing region
+        // Prevent region-click from also creating a new region in add-mode
         wsRegions.on('region-clicked', () => {
           regionJustClickedRef.current = true
           requestAnimationFrame(() => { regionJustClickedRef.current = false })
         })
 
-        // Click-to-add-region mode: clicking the waveform creates a 0.5s region at that time
+        // Click-to-add-region mode
         ws.on('interaction', (time: number) => {
           if (destroyed || !addModeRef.current || regionJustClickedRef.current) return
+          const snap = wordsRef.current.map((w) => ({ ...w }))
+          historyRef.current = [...historyRef.current.slice(-19), snap]
+          setHistoryLength(historyRef.current.length)
           const half = 0.25
           const dur = durationRef.current
           const newWord: ReviewWord = {
@@ -257,7 +288,33 @@ export default function WaveformReview({
     }
   }, [audioUrl])
 
-  // ── Expand/collapse waveform height ──────────────────────────────────────
+  // ── Undo: Cmd+Z / Ctrl+Z keyboard shortcut ───────────────────────────────
+  const handleUndo = useCallback(() => {
+    if (historyRef.current.length === 0) {
+      toast('Nothing to undo', { icon: 'ℹ️', duration: 1200 })
+      return
+    }
+    const prev = historyRef.current[historyRef.current.length - 1]
+    historyRef.current = historyRef.current.slice(0, -1)
+    setHistoryLength(historyRef.current.length)
+    rebuildRegions(prev)
+    onWordsChangeRef.current(prev)
+  }, []) // only accesses stable refs and setState setters
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 'z') {
+        e.preventDefault()
+        handleUndo()
+      }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [handleUndo])
+
+  // ── Expand/collapse waveform ──────────────────────────────────────────────
   const toggleExpand = () => {
     setExpanded((prev) => {
       const next = !prev
@@ -275,21 +332,14 @@ export default function WaveformReview({
     if (!isPlaying) wsRef.current.play()
   }
 
-  // Plays a ~3-second window with the mute applied so the user can hear
-  // exactly what the clean version will sound like at that spot.
-  // (The per-word preview disables real-time muting while it's running
-  //  so it can manage volume itself.)
   const previewWord = useCallback((word: ReviewWord) => {
     if (!wsRef.current || !durationRef.current) return
     if (previewCleanupRef.current) { previewCleanupRef.current(); previewCleanupRef.current = null }
-
     const ws = wsRef.current
     const previewStart = Math.max(0, word.start - 1.0)
     const previewEnd = word.end + 1.5
-
     setPreviewWordId(word.id)
     ws.seekTo(previewStart / durationRef.current)
-
     const handler = (time: number) => {
       ws.setVolume(time >= word.start && time <= word.end ? 0 : 1)
       if (time >= previewEnd) cleanup()
@@ -300,17 +350,19 @@ export default function WaveformReview({
       ws.pause()
       setPreviewWordId(null)
       previewCleanupRef.current = null
-      isInMuteZoneRef.current = false // reset so real-time muting picks up correctly
+      isInMuteZoneRef.current = false
     }
     previewCleanupRef.current = cleanup
     ws.on('audioprocess', handler)
     ws.play()
   }, [])
 
-  // ── Word list operations ──────────────────────────────────────────────────
+  // ── Word mutations ────────────────────────────────────────────────────────
+
   const nudgeWord = (id: string, delta: number) => {
     const word = wordsRef.current.find((w) => w.id === id)
     if (!word) return
+    pushHistory(wordsRef.current)
     const newStart = Math.max(0, +(word.start + delta).toFixed(2))
     const newEnd = Math.max(0, +(word.end + delta).toFixed(2))
     const region = regionMapRef.current.get(id)
@@ -322,7 +374,28 @@ export default function WaveformReview({
     onWordsChange(wordsRef.current.map((w) => w.id === id ? { ...w, start: newStart, end: newEnd } : w))
   }
 
+  // Expand (+) or shrink (−) the mute window symmetrically from its center.
+  // delta = +0.05 to grow 0.1s total, -0.05 to shrink; minimum window = 0.1s.
+  const resizeWord = (id: string, delta: number) => {
+    const word = wordsRef.current.find((w) => w.id === id)
+    if (!word) return
+    const half = (word.end - word.start) / 2
+    const newHalf = Math.max(0.05, half + delta)
+    const center = (word.start + word.end) / 2
+    const newStart = Math.max(0, +(center - newHalf).toFixed(2))
+    const newEnd = +(center + newHalf).toFixed(2)
+    pushHistory(wordsRef.current)
+    const region = regionMapRef.current.get(id)
+    if (region) {
+      programmaticRef.current = true
+      region.setOptions({ start: newStart, end: newEnd })
+      programmaticRef.current = false
+    }
+    onWordsChange(wordsRef.current.map((w) => w.id === id ? { ...w, start: newStart, end: newEnd } : w))
+  }
+
   const removeWord = (id: string) => {
+    pushHistory(wordsRef.current)
     const region = regionMapRef.current.get(id)
     if (region) { region.remove(); regionMapRef.current.delete(id) }
     onWordsChange(wordsRef.current.filter((w) => w.id !== id))
@@ -332,6 +405,7 @@ export default function WaveformReview({
     if (!newWordText.trim()) { toast.error('Enter a word to add'); return }
     const t = parseTimeInput(newWordTime)
     if (isNaN(t)) { toast.error('Enter a valid time like 1:23 or 83'); return }
+    pushHistory(wordsRef.current)
     const newWord: ReviewWord = {
       id: uuidv4(),
       word: newWordText.trim().toLowerCase(),
@@ -354,11 +428,50 @@ export default function WaveformReview({
     setNewWordText('')
   }
 
+  // ── Copy / Paste timing ───────────────────────────────────────────────────
+
+  // Copy the offset this word was shifted from its originally-detected position.
+  // Paste applies that same shift to another word's original position.
+  const copyTiming = (word: ReviewWord) => {
+    const original = initialWordsRef.current.find((w) => w.id === word.id)
+    const delta = original ? +(word.start - original.start).toFixed(2) : 0
+    setCopiedDelta(delta)
+    setCopiedFromId(word.id)
+    const sign = delta >= 0 ? '+' : ''
+    toast.success(`Offset ${sign}${delta}s copied`, { duration: 1500 })
+  }
+
+  const pasteTiming = (targetWord: ReviewWord) => {
+    if (copiedDelta === null) return
+    const original = initialWordsRef.current.find((w) => w.id === targetWord.id)
+    // Apply the delta from the original detected position; fall back to current if no original
+    const baseStart = original ? original.start : targetWord.start
+    const baseEnd = original ? original.end : targetWord.end
+    const newStart = Math.max(0, +(baseStart + copiedDelta).toFixed(2))
+    const newEnd = +(baseEnd + copiedDelta).toFixed(2)
+    pushHistory(wordsRef.current)
+    const region = regionMapRef.current.get(targetWord.id)
+    if (region) {
+      programmaticRef.current = true
+      region.setOptions({ start: newStart, end: newEnd })
+      programmaticRef.current = false
+    }
+    onWordsChange(
+      wordsRef.current.map((w) =>
+        w.id === targetWord.id ? { ...w, start: newStart, end: newEnd } : w
+      )
+    )
+  }
+
+  // ── Button style helpers ──────────────────────────────────────────────────
+  const btnSm = 'text-xs bg-white/10 hover:bg-white/20 text-white/50 hover:text-white px-1.5 py-1 rounded transition-colors'
+  const btnIcon = 'w-7 h-7 rounded flex items-center justify-center text-white/35 hover:text-white hover:bg-white/10 disabled:opacity-30 transition-colors text-xs'
+
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="mb-8 space-y-4 animate-fade-in">
 
-      {/* Waveform card */}
+      {/* ── Waveform card ──────────────────────────────────────────────── */}
       <div className="glass rounded-2xl overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-5 pt-4 pb-0">
@@ -407,8 +520,8 @@ export default function WaveformReview({
           )}
         </div>
 
-        {/* Playback controls */}
-        <div className="border-t border-white/10 px-4 py-3 flex items-center gap-3 flex-wrap">
+        {/* Playback + tool controls */}
+        <div className="border-t border-white/10 px-4 py-3 flex items-center gap-2 flex-wrap">
           {/* Play/pause */}
           <button
             onClick={togglePlay}
@@ -427,12 +540,12 @@ export default function WaveformReview({
             )}
           </button>
 
-          {/* Time display */}
+          {/* Time */}
           <span className="text-xs font-mono text-white/40 tabular-nums">
             {fmt(currentTime)} / {fmt(duration)}
           </span>
 
-          {/* Hint */}
+          {/* Context hint */}
           {isLoaded && !addMode && (
             <span className="text-xs text-white/20 hidden sm:block">
               Regions mute audio during playback · drag to adjust
@@ -440,12 +553,23 @@ export default function WaveformReview({
           )}
           {isLoaded && addMode && (
             <span className="text-xs text-violet-300/60 hidden sm:block">
-              Click anywhere on the waveform to add a mute region
+              Click waveform to add a mute region
             </span>
           )}
 
-          {/* Spacer */}
           <div className="flex-1" />
+
+          {/* Undo button */}
+          {isLoaded && (
+            <button
+              onClick={handleUndo}
+              disabled={historyLength === 0}
+              title="Undo last change (Cmd+Z / Ctrl+Z)"
+              className="text-xs px-2.5 py-1.5 rounded-lg bg-white/5 border border-white/10 text-white/40 hover:text-white hover:bg-white/10 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
+            >
+              ↩{historyLength > 0 ? ` ${historyLength}` : ''}
+            </button>
+          )}
 
           {/* Add-region mode toggle */}
           {isLoaded && (
@@ -462,7 +586,7 @@ export default function WaveformReview({
             </button>
           )}
 
-          {/* Expand/collapse */}
+          {/* Expand/collapse waveform */}
           {isLoaded && (
             <button
               onClick={toggleExpand}
@@ -475,11 +599,19 @@ export default function WaveformReview({
         </div>
       </div>
 
-      {/* Word list + controls */}
+      {/* ── Word list ─────────────────────────────────────────────────── */}
       <div className="glass rounded-2xl p-5">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-white/60 text-xs font-medium uppercase tracking-wider">Flagged words</h3>
-          <span className="text-white/30 text-xs">{words.length} found</span>
+          <div className="flex items-center gap-3">
+            {copiedDelta !== null && (
+              <span className="text-xs text-violet-300/70">
+                offset {copiedDelta >= 0 ? '+' : ''}{copiedDelta}s copied
+                <button onClick={() => { setCopiedDelta(null); setCopiedFromId(null) }} className="ml-1.5 text-white/30 hover:text-white/60">×</button>
+              </span>
+            )}
+            <span className="text-white/30 text-xs">{words.length} found</span>
+          </div>
         </div>
 
         {words.length === 0 ? (
@@ -491,12 +623,13 @@ export default function WaveformReview({
             {words.map((word) => (
               <div
                 key={word.id}
-                className={`flex items-center gap-2 rounded-lg px-3 py-2 transition-colors ${
+                className={`flex items-center gap-2 rounded-lg px-3 py-2 transition-colors flex-wrap ${
                   activeWordId === word.id
                     ? 'bg-red-500/15 border border-red-500/30'
                     : 'bg-white/5 border border-transparent hover:border-white/10'
                 }`}
               >
+                {/* Word + timestamp */}
                 <span className="text-red-400 font-mono text-sm font-bold w-20 shrink-0 truncate">
                   {censor(word.word)}
                 </span>
@@ -504,72 +637,64 @@ export default function WaveformReview({
                   {fmt(word.start)} → {fmt(word.end)}
                 </span>
 
+                {/* Controls */}
                 <div className="flex items-center gap-1 ml-auto flex-wrap justify-end">
-                  {/* Jump to context */}
-                  <button
-                    onClick={() => jumpToWord(word)}
-                    disabled={!isLoaded}
-                    title="Jump to this word and play"
-                    className="w-7 h-7 rounded flex items-center justify-center text-white/35 hover:text-white hover:bg-white/10 disabled:opacity-30 transition-colors text-xs"
-                  >
-                    ▶
-                  </button>
 
-                  {/* Preview with mute applied */}
+                  {/* Playback: jump + preview */}
+                  <button onClick={() => jumpToWord(word)} disabled={!isLoaded} title="Jump to this word" className={btnIcon}>▶</button>
                   <button
                     onClick={() => previewWord(word)}
                     disabled={!isLoaded || !!previewWordId}
-                    title="Preview this 3-second window with the mute applied"
-                    className={`w-7 h-7 rounded flex items-center justify-center transition-colors text-xs ${
-                      previewWordId === word.id
-                        ? 'bg-violet-600 text-white'
-                        : 'text-white/35 hover:text-white hover:bg-white/10 disabled:opacity-30'
-                    }`}
+                    title="Preview 3s window with mute applied"
+                    className={`${btnIcon} ${previewWordId === word.id ? 'bg-violet-600 text-white' : ''}`}
                   >
                     {previewWordId === word.id ? '◉' : '◎'}
                   </button>
 
-                  {/* Fine nudge -0.1s */}
-                  <button
-                    onClick={() => nudgeWord(word.id, -0.1)}
-                    title="Shift 0.1s earlier"
-                    className="text-xs bg-white/5 hover:bg-white/15 text-white/40 hover:text-white px-1 py-1 rounded transition-colors font-mono"
-                  >
-                    ←·
-                  </button>
+                  {/* Divider */}
+                  <span className="w-px h-4 bg-white/10 mx-0.5" />
 
-                  {/* Coarse nudge -0.5s */}
+                  {/* Copy / Paste */}
                   <button
-                    onClick={() => nudgeWord(word.id, -0.5)}
-                    title="Shift 0.5s earlier"
-                    className="text-xs bg-white/10 hover:bg-white/20 text-white/50 hover:text-white px-1.5 py-1 rounded transition-colors"
+                    onClick={() => copyTiming(word)}
+                    title="Copy this word's timing offset"
+                    className={`${btnSm} ${copiedFromId === word.id ? '!bg-violet-600/30 !text-violet-300 border border-violet-500/30' : ''}`}
                   >
-                    ← 0.5s
+                    copy
                   </button>
+                  {copiedDelta !== null && copiedFromId !== word.id && (
+                    <button
+                      onClick={() => pasteTiming(word)}
+                      title={`Paste offset ${copiedDelta >= 0 ? '+' : ''}${copiedDelta}s`}
+                      className={`${btnSm} !bg-violet-600/20 !text-violet-300 border border-violet-500/20`}
+                    >
+                      paste
+                    </button>
+                  )}
 
-                  {/* Coarse nudge +0.5s */}
-                  <button
-                    onClick={() => nudgeWord(word.id, 0.5)}
-                    title="Shift 0.5s later"
-                    className="text-xs bg-white/10 hover:bg-white/20 text-white/50 hover:text-white px-1.5 py-1 rounded transition-colors"
-                  >
-                    0.5s →
-                  </button>
+                  {/* Divider */}
+                  <span className="w-px h-4 bg-white/10 mx-0.5" />
 
-                  {/* Fine nudge +0.1s */}
-                  <button
-                    onClick={() => nudgeWord(word.id, 0.1)}
-                    title="Shift 0.1s later"
-                    className="text-xs bg-white/5 hover:bg-white/15 text-white/40 hover:text-white px-1 py-1 rounded transition-colors font-mono"
-                  >
-                    ·→
-                  </button>
+                  {/* Resize −/+ */}
+                  <button onClick={() => resizeWord(word.id, -0.05)} title="Shrink region by 0.1s" className={btnSm}>−</button>
+                  <button onClick={() => resizeWord(word.id, 0.05)} title="Expand region by 0.1s" className={btnSm}>+</button>
+
+                  {/* Divider */}
+                  <span className="w-px h-4 bg-white/10 mx-0.5" />
+
+                  {/* Fine nudge ±0.1s */}
+                  <button onClick={() => nudgeWord(word.id, -0.1)} title="Shift 0.1s earlier" className="text-xs bg-white/5 hover:bg-white/15 text-white/40 hover:text-white px-1 py-1 rounded transition-colors font-mono">←·</button>
+                  {/* Coarse nudge ±0.5s */}
+                  <button onClick={() => nudgeWord(word.id, -0.5)} title="Shift 0.5s earlier" className={btnSm}>← 0.5s</button>
+                  <button onClick={() => nudgeWord(word.id, 0.5)} title="Shift 0.5s later" className={btnSm}>0.5s →</button>
+                  <button onClick={() => nudgeWord(word.id, 0.1)} title="Shift 0.1s later" className="text-xs bg-white/5 hover:bg-white/15 text-white/40 hover:text-white px-1 py-1 rounded transition-colors font-mono">·→</button>
 
                   {/* Remove */}
+                  <span className="w-px h-4 bg-white/10 mx-0.5" />
                   <button
                     onClick={() => removeWord(word.id)}
                     title="Remove (false positive)"
-                    className="w-7 h-7 flex items-center justify-center rounded bg-red-500/10 hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors ml-1 text-base leading-none"
+                    className="w-7 h-7 flex items-center justify-center rounded bg-red-500/10 hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors ml-0.5 text-base leading-none"
                   >
                     ×
                   </button>
@@ -579,7 +704,7 @@ export default function WaveformReview({
           </div>
         )}
 
-        {/* Add missed word */}
+        {/* Add missed word form */}
         <div className="border-t border-white/10 mt-4 pt-4">
           <p className="text-white/30 text-xs mb-2">Add a missed word</p>
           <div className="flex gap-2">
