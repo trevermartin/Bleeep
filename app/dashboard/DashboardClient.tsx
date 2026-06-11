@@ -61,13 +61,11 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
   const [lyricsExpanded, setLyricsExpanded] = useState(false)
 
   // ── Import tab state ─────────────────────────────────────────────────────────
-  const [uploadTab, setUploadTab] = useState<'file' | 'youtube' | 'soundcloud'>('file')
-  const [youtubeUrl, setYoutubeUrl] = useState('')
-  const [isYoutubeImporting, setIsYoutubeImporting] = useState(false)
-  const [youtubeError, setYoutubeError] = useState<string | null>(null)
+  const [uploadTab, setUploadTab] = useState<'file' | 'soundcloud'>('file')
   const [soundcloudUrl, setSoundcloudUrl] = useState('')
   const [isSoundcloudImporting, setIsSoundcloudImporting] = useState(false)
   const [soundcloudError, setSoundcloudError] = useState<string | null>(null)
+  const [howToExpanded, setHowToExpanded] = useState(false)
 
   const FREE_LIMIT = 3
   const isPro = profile?.plan === 'pro'
@@ -183,103 +181,6 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
     },
     [muteType, atLimit, lyricsInput]
   )
-
-  // ── YouTube import ───────────────────────────────────────────────────────────
-  const handleYoutubeImport = async () => {
-    const url = youtubeUrl.trim()
-    if (!url) return
-    if (atLimit) { toast.error("You've reached your free limit. Upgrade to Pro!"); return }
-
-    setResult(null)
-    setPendingReview(null)
-    setYoutubeError(null)
-    setIsYoutubeImporting(true)
-
-    const abortController = new AbortController()
-    const timeoutId = setTimeout(() => abortController.abort(), PROCESS_TIMEOUT_MS)
-
-    try {
-      // Step 1 — download YouTube audio and upload to Supabase
-      setStatus({ stage: 'uploading', message: 'Downloading YouTube audio…', progress: 15 })
-      const ytRes = await fetch('/api/youtube', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ youtubeUrl: url }),
-        signal: abortController.signal,
-      })
-      const ytData = await ytRes.json()
-      if (!ytRes.ok) {
-        setYoutubeError(ytData.error || 'Failed to import YouTube video')
-        setStatus(null)
-        return
-      }
-
-      // Step 2 — pass through the same pipeline as an uploaded file
-      setIsYoutubeImporting(false)
-      setIsProcessing(true)
-      setStatus({ stage: 'analyzing', message: STAGE_LABELS.analyzing, progress: 30 })
-
-      const processRes = await fetch('/api/process', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          songId: ytData.songId,
-          originalUrl: ytData.originalUrl,
-          originalFilename: ytData.originalFilename,
-          muteType,
-          manualLyrics: lyricsInput.trim() || undefined,
-        }),
-        signal: abortController.signal,
-      })
-
-      setStatus({ stage: 'processing', message: STAGE_LABELS.processing, progress: 80 })
-      const data = await processRes.json()
-
-      if (!processRes.ok) {
-        if (data.upgrade) {
-          toast.error('Monthly limit reached. Upgrade to Pro for unlimited songs.')
-        } else {
-          toast.error(data.error || 'Processing failed. Please try again.')
-        }
-        setStatus({ stage: 'failed', message: data.error || 'Processing failed', progress: 0 })
-        return
-      }
-
-      setStatus({ stage: 'complete', message: STAGE_LABELS.complete, progress: 100 })
-      const words: ReviewWord[] = (data.wordsDetected || []).map((w: DetectedWord) => ({
-        ...w,
-        id: uuidv4(),
-      }))
-      setPendingReview({
-        songId: ytData.songId,
-        originalUrl: ytData.originalUrl,
-        originalFilename: ytData.originalFilename,
-        words,
-        detectionMethod: data.detectionMethod ?? 'ai',
-      })
-      setYoutubeUrl('')
-
-      const wc = words.length
-      toast.success(
-        wc === 0
-          ? 'No profanity detected!'
-          : `Found ${wc} word${wc !== 1 ? 's' : ''} — review the list below.`
-      )
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        toast.error('Import timed out. Please try again.')
-        setStatus({ stage: 'failed', message: 'Timed out — please try again', progress: 0 })
-      } else {
-        const message = err instanceof Error ? err.message : 'An unexpected error occurred.'
-        toast.error(message)
-        setStatus({ stage: 'failed', message, progress: 0 })
-      }
-    } finally {
-      clearTimeout(timeoutId)
-      setIsYoutubeImporting(false)
-      setIsProcessing(false)
-    }
-  }
 
   // ── SoundCloud import ────────────────────────────────────────────────────────
   const handleSoundcloudImport = async () => {
@@ -540,7 +441,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                   <button
                     key={type}
                     onClick={() => setMuteType(type)}
-                    disabled={isProcessing || isYoutubeImporting || isSoundcloudImporting}
+                    disabled={isProcessing || isSoundcloudImporting}
                     className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
                       muteType === type
                         ? 'bg-violet-600 text-white'
@@ -553,8 +454,8 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
               </div>
             </div>
 
-            {/* Processing / loading state — shared across file, YouTube, and SoundCloud imports */}
-            {(isProcessing || isYoutubeImporting || isSoundcloudImporting) ? (
+            {/* Processing / loading state — shared across file and SoundCloud imports */}
+            {(isProcessing || isSoundcloudImporting) ? (
               <div className="border-2 border-violet-500/30 bg-violet-600/5 rounded-2xl p-12 text-center">
                 <div className="w-16 h-16 rounded-2xl bg-violet-600/20 flex items-center justify-center mx-auto mb-4">
                   <div className="w-8 h-8 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
@@ -588,7 +489,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                 <p className="text-red-400 font-medium mb-1">Processing failed</p>
                 <p className="text-white/40 text-sm mb-4">{status.message}</p>
                 <button
-                  onClick={() => { setStatus(null); setYoutubeError(null) }}
+                  onClick={() => setStatus(null)}
                   className="text-violet-400 text-sm hover:text-violet-300 underline"
                 >
                   Try again
@@ -599,7 +500,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                 {/* Tab switcher */}
                 <div className="flex mb-3 bg-white/5 border border-white/10 rounded-xl p-1 gap-1">
                   <button
-                    onClick={() => { setUploadTab('file'); setYoutubeError(null); setSoundcloudError(null) }}
+                    onClick={() => { setUploadTab('file'); setSoundcloudError(null) }}
                     className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-all ${
                       uploadTab === 'file' ? 'bg-violet-600 text-white shadow' : 'text-white/40 hover:text-white/70'
                     }`}
@@ -610,18 +511,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                     Upload File
                   </button>
                   <button
-                    onClick={() => { setUploadTab('youtube'); setYoutubeError(null); setSoundcloudError(null) }}
-                    className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-all ${
-                      uploadTab === 'youtube' ? 'bg-violet-600 text-white shadow' : 'text-white/40 hover:text-white/70'
-                    }`}
-                  >
-                    <svg viewBox="0 0 24 24" fill="currentColor" className="w-3.5 h-3.5 shrink-0">
-                      <path d="M23.498 6.186a3.016 3.016 0 00-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 00.502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 002.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 002.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
-                    </svg>
-                    YouTube
-                  </button>
-                  <button
-                    onClick={() => { setUploadTab('soundcloud'); setYoutubeError(null); setSoundcloudError(null) }}
+                    onClick={() => { setUploadTab('soundcloud'); setSoundcloudError(null) }}
                     className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-all ${
                       uploadTab === 'soundcloud' ? 'bg-violet-600 text-white shadow' : 'text-white/40 hover:text-white/70'
                     }`}
@@ -629,12 +519,13 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                     <svg viewBox="0 0 24 24" fill="currentColor" className="w-3.5 h-3.5 shrink-0">
                       <path d="M1.175 12.225c-.059 0-.106.045-.116.112l-.479 3.025.479 2.978c.01.067.057.112.116.112.059 0 .107-.045.115-.112l.544-2.978-.544-3.025c-.008-.067-.056-.112-.115-.112zm1.31-.544c-.069 0-.124.054-.132.122l-.416 3.569.416 3.459c.008.069.063.122.132.122.069 0 .124-.053.131-.122l.474-3.459-.474-3.569c-.007-.068-.062-.122-.131-.122zm1.35-.248c-.078 0-.142.062-.149.139l-.353 3.817.353 3.7c.007.077.071.139.149.139.078 0 .143-.062.149-.139l.4-3.7-.4-3.817c-.006-.077-.071-.139-.149-.139zm1.395.057c-.088 0-.16.07-.165.158l-.289 3.76.289 3.633c.005.088.077.158.165.158.089 0 .16-.07.165-.158l.328-3.633-.328-3.76c-.005-.088-.076-.158-.165-.158zm1.42-.156c-.097 0-.177.078-.181.174l-.226 3.916.226 3.561c.004.096.084.174.181.174.098 0 .177-.078.18-.174l.257-3.561-.257-3.916c-.003-.096-.082-.174-.18-.174zm1.448.091c-.107 0-.195.086-.198.193l-.162 3.825.162 3.489c.003.107.091.193.198.193.108 0 .196-.086.197-.193l.184-3.489-.184-3.825c-.001-.107-.089-.193-.197-.193zm1.475-.07c-.116 0-.211.093-.213.209l-.099 3.895.099 3.417c.002.116.097.209.213.209.117 0 .211-.093.213-.209l.112-3.417-.112-3.895c-.002-.116-.096-.209-.213-.209zm1.503-.116c-.126 0-.229.101-.229.226l-.036 4.011.036 3.345c0 .125.103.226.229.226.127 0 .229-.101.229-.226l.041-3.345-.041-4.011c0-.125-.102-.226-.229-.226zm1.529.045c-.135 0-.245.109-.245.243v3.966l.245 3.273c0 .134.11.243.245.243.136 0 .246-.109.245-.243l.278-3.273-.278-3.966c0-.134-.109-.243-.245-.243zm1.555-.215c-.145 0-.262.116-.262.26l0 .001-.204 4.181.204 3.201c0 .144.117.26.262.26.146 0 .263-.116.262-.26l.232-3.201-.232-4.181c0-.144-.116-.261-.262-.261zm1.58.045c-.154 0-.279.124-.279.277l-.14 4.136.14 3.129c0 .153.125.277.279.277.155 0 .28-.124.279-.277l.159-3.129-.159-4.136c0-.153-.124-.277-.279-.277zm4.098-1.127c-.201-.077-.412-.116-.627-.115-.229 0-.45.041-.659.118-.047-2.404-1.999-4.345-4.408-4.345-1.064 0-2.038.382-2.796 1.013-.29.238-.368.518-.372.793v8.619c.004.283.232.513.516.524h8.346c.57 0 1.034-.458 1.034-1.024v-3.458c0-1.204-.808-2.22-2.034-2.125z" />
                     </svg>
-                    SoundCloud
+                    SoundCloud Link
                   </button>
                 </div>
 
                 {/* File upload tab */}
                 {uploadTab === 'file' && (
+                  <>
                   <div
                     {...getRootProps()}
                     className={`relative border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all duration-200 ${
@@ -671,63 +562,77 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                       )}
                     </div>
                   </div>
-                )}
 
-                {/* YouTube import tab */}
-                {uploadTab === 'youtube' && (
-                  <div className="border-2 border-dashed border-white/20 hover:border-white/30 rounded-2xl p-10 transition-colors">
-                    <div className="max-w-md mx-auto text-center">
-                      <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center mx-auto mb-4">
-                        <svg viewBox="0 0 24 24" fill="currentColor" className="w-8 h-8 text-red-400">
-                          <path d="M23.498 6.186a3.016 3.016 0 00-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 00.502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 002.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 002.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
-                        </svg>
+                  {/* How to get your MP3 guide */}
+                  <div className="mt-3">
+                    <button
+                      type="button"
+                      onClick={() => setHowToExpanded(!howToExpanded)}
+                      className="text-xs text-white/30 hover:text-white/50 flex items-center gap-1.5 transition-colors"
+                    >
+                      <svg
+                        viewBox="0 0 20 20"
+                        fill="currentColor"
+                        className={`w-3 h-3 transition-transform ${howToExpanded ? 'rotate-90' : ''}`}
+                      >
+                        <path
+                          fillRule="evenodd"
+                          d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
+                          clipRule="evenodd"
+                        />
+                      </svg>
+                      Don&apos;t have the MP3 file? Here&apos;s how to get it
+                    </button>
+
+                    {howToExpanded && (
+                      <div className="mt-3 bg-white/5 border border-white/10 rounded-xl p-4 space-y-4 text-xs text-white/60">
+                        {/* Tip box */}
+                        <div className="bg-violet-600/10 border border-violet-500/20 rounded-lg px-3 py-2.5 text-violet-200/80">
+                          <span className="font-semibold">Tip:</span> Leave the filename as-is after downloading. Bleeep reads it to find your song&apos;s lyrics automatically &mdash; the format &ldquo;Artist - Song Name.mp3&rdquo; works best.
+                        </div>
+
+                        {/* Method 1: cnvmp3.com */}
+                        <div>
+                          <p className="font-semibold text-white/70 mb-1.5">Method 1 &mdash; Convert from YouTube (free website)</p>
+                          <ol className="list-decimal list-inside space-y-1 pl-1">
+                            <li>Go to <span className="text-violet-300 font-mono">cnvmp3.com/v54</span> in your browser</li>
+                            <li>Find the song on YouTube and copy its URL from the address bar</li>
+                            <li>Paste the URL into the box on cnvmp3.com and click <span className="text-white/80">Convert</span></li>
+                            <li>Wait a few seconds for it to process</li>
+                            <li>Click <span className="text-white/80">Download</span> to save the MP3</li>
+                            <li>Come back here and upload that file &mdash; done!</li>
+                          </ol>
+                        </div>
+
+                        {/* Method 2: Already have it */}
+                        <div>
+                          <p className="font-semibold text-white/70 mb-1.5">Method 2 &mdash; Already own the song</p>
+                          <ul className="space-y-1 pl-1">
+                            <li><span className="text-white/80">iPhone:</span> Open the <span className="text-white/80">Files</span> app, find the MP3, then share it to your computer or upload directly</li>
+                            <li><span className="text-white/80">Mac:</span> Open <span className="text-white/80">Music</span> (iTunes), right-click the track &rarr; <span className="text-white/80">Show in Finder</span>, then drag the file here</li>
+                            <li><span className="text-white/80">PC:</span> Open <span className="text-white/80">iTunes</span>, right-click the track &rarr; <span className="text-white/80">Show in Windows Explorer</span>, then drag the file here</li>
+                          </ul>
+                        </div>
+
+                        {/* Method 3: SoundCloud */}
+                        <div>
+                          <p className="font-semibold text-white/70 mb-1">Method 3 &mdash; Import from SoundCloud</p>
+                          <p>
+                            If the song is on SoundCloud, use the{' '}
+                            <button
+                              type="button"
+                              onClick={() => { setUploadTab('soundcloud'); setHowToExpanded(false) }}
+                              className="text-violet-400 hover:text-violet-300 underline"
+                            >
+                              SoundCloud Link
+                            </button>
+                            {' '}tab above &mdash; no download needed.
+                          </p>
+                        </div>
                       </div>
-                      {atLimit ? (
-                        <>
-                          <p className="text-white font-medium mb-1">Monthly limit reached</p>
-                          <p className="text-white/40 text-sm">
-                            <Link href="/pricing" className="text-violet-400 hover:underline">Upgrade to Pro</Link>{' '}for unlimited songs
-                          </p>
-                        </>
-                      ) : (
-                        <>
-                          <p className="text-white font-medium mb-1">Paste a YouTube link</p>
-                          <p className="text-white/40 text-sm mb-4">
-                            We&apos;ll download the audio and run it through the same pipeline
-                          </p>
-                          <div className="flex gap-2">
-                            <input
-                              type="url"
-                              value={youtubeUrl}
-                              onChange={(e) => { setYoutubeUrl(e.target.value); setYoutubeError(null) }}
-                              onKeyDown={(e) => e.key === 'Enter' && handleYoutubeImport()}
-                              placeholder="https://youtube.com/watch?v=..."
-                              className="flex-1 bg-white/5 border border-white/15 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-violet-500/60 placeholder:text-white/25"
-                            />
-                            <button
-                              onClick={handleYoutubeImport}
-                              disabled={!youtubeUrl.trim()}
-                              className="shrink-0 bg-red-500/80 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium px-4 py-2.5 rounded-xl text-sm transition-colors"
-                            >
-                              Import &amp; Clean
-                            </button>
-                          </div>
-                          {youtubeError && (
-                            <p className="mt-2 text-red-400 text-sm">{youtubeError}</p>
-                          )}
-                          <p className="mt-3 text-white/25 text-xs">
-                            Age-restricted videos can&apos;t be imported.{' '}
-                            <button
-                              onClick={() => setUploadTab('soundcloud')}
-                              className="text-violet-400/70 hover:text-violet-300 underline"
-                            >
-                              Try SoundCloud instead
-                            </button>
-                          </p>
-                        </>
-                      )}
-                    </div>
+                    )}
                   </div>
+                  </>
                 )}
 
                 {/* SoundCloud import tab */}
@@ -781,7 +686,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
             )}
 
             {/* Manual lyrics input — expandable, hidden while processing */}
-            {!isProcessing && !isYoutubeImporting && !isSoundcloudImporting && (
+            {!isProcessing && !isSoundcloudImporting && (
               <div className="mt-3">
                 <button
                   type="button"
