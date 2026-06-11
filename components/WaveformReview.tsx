@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/exhaustive-deps, react/no-unescaped-entities, prefer-const */
+/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/exhaustive-deps, react/no-unescaped-entities */
 'use client'
 
 import { useEffect, useRef, useState, useCallback } from 'react'
@@ -120,6 +120,7 @@ export default function WaveformReview({
     if (wsRef.current && isPlaying && !previewCleanupRef.current) {
       scheduleMutesRef.current?.(wsRef.current.getCurrentTime())
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [words])
   useEffect(() => { onWordsChangeRef.current = onWordsChange }, [onWordsChange])
   useEffect(() => { muteTypeRef.current = muteType }, [muteType])
@@ -266,16 +267,7 @@ export default function WaveformReview({
           setCurrentTime(time)
           const active = wordsRef.current.find((w) => time >= w.start && time <= w.end)
           setActiveWordId(active?.id ?? null)
-          // Safety-net fallback: catch any transition the setTimeout approach may have missed
-          // (e.g. audio startup latency causing wall-clock vs audio-clock drift).
-          // Only fires on zone entry/exit transitions, not every tick.
-          if (!previewCleanupRef.current && mutePreviewEnabledRef.current) {
-            const inZone = !!active
-            if (inZone !== isInMuteZoneRef.current) {
-              isInMuteZoneRef.current = inZone
-              ws.setVolume(inZone ? 0 : 1)
-            }
-          }
+          // Volume is managed by scheduled timeouts above, not by polling here
         })
 
         // region-updated fires once on mouse-up after drag/resize
@@ -353,6 +345,7 @@ export default function WaveformReview({
         wsRef.current.destroy()
         wsRef.current = null
         regionsRef.current = null
+        // eslint-disable-next-line react-hooks/exhaustive-deps
         regionMapRef.current.clear()
       }
     }
@@ -409,15 +402,14 @@ export default function WaveformReview({
     const ws = wsRef.current
     const previewStart = Math.max(0, word.start - 1.0)
     const previewEnd = word.end + 1.5
-    const timeouts: ReturnType<typeof setTimeout>[] = []
-
-    // Forward-declared so cleanup can call ws.un(onPlay) before onPlay is defined
-    // eslint-disable-next-line prefer-const
-    let onPlay: () => void
-
+    setPreviewWordId(word.id)
+    ws.seekTo(previewStart / durationRef.current)
+    const handler = (time: number) => {
+      ws.setVolume(time >= word.start && time <= word.end ? 0 : 1)
+      if (time >= previewEnd) cleanup()
+    }
     const cleanup = () => {
-      ws.un('play', onPlay)
-      timeouts.forEach(clearTimeout)
+      ws.un('audioprocess', handler)
       ws.setVolume(1)
       ws.pause()
       setPreviewWordId(null)
@@ -425,23 +417,7 @@ export default function WaveformReview({
       isInMuteZoneRef.current = false
     }
     previewCleanupRef.current = cleanup
-    setPreviewWordId(word.id)
-    ws.seekTo(previewStart / durationRef.current)
-
-    // Use the same setTimeout mechanism as main playback so timing is identical.
-    // Schedule from the actual post-seek audio time once play fires.
-    onPlay = () => {
-      ws.un('play', onPlay)
-      const t = ws.getCurrentTime()
-      const muteIn  = Math.max(0, (word.start - t) * 1000)
-      const unmuteIn = Math.max(muteIn + 10, (word.end - t) * 1000)
-      const stopIn  = Math.max(unmuteIn + 10, (previewEnd - t) * 1000)
-      if (muteIn === 0) ws.setVolume(0)
-      else timeouts.push(setTimeout(() => { if (previewCleanupRef.current) ws.setVolume(0) }, muteIn))
-      timeouts.push(setTimeout(() => { if (previewCleanupRef.current) ws.setVolume(1) }, unmuteIn))
-      timeouts.push(setTimeout(() => { if (previewCleanupRef.current === cleanup) cleanup() }, stopIn))
-    }
-    ws.on('play', onPlay)
+    ws.on('audioprocess', handler)
     ws.play()
   }, [])
 
@@ -451,10 +427,8 @@ export default function WaveformReview({
     const word = wordsRef.current.find((w) => w.id === id)
     if (!word) return
     pushHistory(wordsRef.current)
-    // Clamp to 0 while preserving region duration
-    const actualDelta = word.start + delta < 0 ? -word.start : delta
-    const newStart = +(word.start + actualDelta).toFixed(2)
-    const newEnd = +(word.end + actualDelta).toFixed(2)
+    const newStart = Math.max(0, +(word.start + delta).toFixed(2))
+    const newEnd = Math.max(0, +(word.end + delta).toFixed(2))
     const region = regionMapRef.current.get(id)
     if (region) {
       programmaticRef.current = true
@@ -534,7 +508,8 @@ export default function WaveformReview({
     const delta = original ? +(word.start - original.start).toFixed(2) : 0
     setCopiedDelta(delta)
     setCopiedFromId(word.id)
-    toast.success(`Copied: ${delta >= 0 ? '+' : ''}${delta}s`, { duration: 1500 })
+    const sign = delta >= 0 ? '+' : ''
+    toast.success(`Offset ${sign}${delta}s copied`, { duration: 1500 })
   }
 
   const pasteTiming = (targetWord: ReviewWord) => {
@@ -788,17 +763,15 @@ export default function WaveformReview({
                   {/* Copy / Paste */}
                   <button
                     onClick={() => copyTiming(word)}
-                    title="Copy the drift correction from this word's originally-detected position"
+                    title="Copy this word's timing offset"
                     className={`${btnSm} ${copiedFromId === word.id ? '!bg-violet-600/30 !text-violet-300 border border-violet-500/30' : ''}`}
                   >
-                    {copiedFromId === word.id && copiedDelta !== null
-                      ? `Copied: ${copiedDelta >= 0 ? '+' : ''}${copiedDelta}s`
-                      : 'copy'}
+                    copy
                   </button>
                   {copiedDelta !== null && copiedFromId !== word.id && (
                     <button
                       onClick={() => pasteTiming(word)}
-                      title={`Apply ${copiedDelta >= 0 ? '+' : ''}${copiedDelta}s correction`}
+                      title={`Paste offset ${copiedDelta >= 0 ? '+' : ''}${copiedDelta}s`}
                       className={`${btnSm} !bg-violet-600/20 !text-violet-300 border border-violet-500/20`}
                     >
                       paste
@@ -815,11 +788,12 @@ export default function WaveformReview({
                   {/* Divider */}
                   <span className="w-px h-4 bg-white/10 mx-0.5" />
 
-                  {/* Nudge entire region earlier/later (duration preserved) */}
-                  <button onClick={() => nudgeWord(word.id, -0.5)} title="Shift 0.5s earlier" className={btnSm}>−0.5s</button>
-                  <button onClick={() => nudgeWord(word.id, -0.1)} title="Shift 0.1s earlier" className={btnSm}>−0.1s</button>
-                  <button onClick={() => nudgeWord(word.id,  0.1)} title="Shift 0.1s later"   className={btnSm}>+0.1s</button>
-                  <button onClick={() => nudgeWord(word.id,  0.5)} title="Shift 0.5s later"   className={btnSm}>+0.5s</button>
+                  {/* Fine nudge ±0.1s */}
+                  <button onClick={() => nudgeWord(word.id, -0.1)} title="Shift 0.1s earlier" className="text-xs bg-white/5 hover:bg-white/15 text-white/40 hover:text-white px-1 py-1 rounded transition-colors font-mono">←·</button>
+                  {/* Coarse nudge ±0.5s */}
+                  <button onClick={() => nudgeWord(word.id, -0.5)} title="Shift 0.5s earlier" className={btnSm}>← 0.5s</button>
+                  <button onClick={() => nudgeWord(word.id, 0.5)} title="Shift 0.5s later" className={btnSm}>0.5s →</button>
+                  <button onClick={() => nudgeWord(word.id, 0.1)} title="Shift 0.1s later" className="text-xs bg-white/5 hover:bg-white/15 text-white/40 hover:text-white px-1 py-1 rounded transition-colors font-mono">·→</button>
 
                   {/* Remove */}
                   <span className="w-px h-4 bg-white/10 mx-0.5" />
