@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any, prefer-const */
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { createClient } from '@/lib/supabase/server'
@@ -48,7 +48,7 @@ function sanitize(s: string): string {
  * the existing parseFilename() in lib/lrclib.ts can do LRCLIB lookups correctly.
  */
 function buildFilename(videoTitle: string, channelName: string): string {
-  let clean = videoTitle
+  const clean = videoTitle
     .replace(/\s*[\(\[][^\)\]]*[\)\]]/g, '') // strip (Official Video), [Lyrics], etc.
     .replace(/\s{2,}/g, ' ')
     .trim()
