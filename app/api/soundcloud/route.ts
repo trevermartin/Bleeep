@@ -22,10 +22,6 @@ function sanitize(s: string): string {
   return s.replace(/[/\\?%*:|"<>]/g, '').replace(/\s+/g, ' ').trim()
 }
 
-/**
- * Build an "Artist - Title.mp3" filename so the existing parseFilename()
- * in lib/lrclib.ts can do LRCLIB lookups without any changes.
- */
 function buildFilename(title: string, artist: string): string {
   const cleanTitle = sanitize(title)
   const cleanArtist = sanitize(artist)
@@ -33,6 +29,27 @@ function buildFilename(title: string, artist: string): string {
     return `${cleanArtist} - ${cleanTitle}.mp3`
   }
   return `${cleanTitle}.mp3`
+}
+
+function isValidSoundCloudTrackUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname.replace(/^www\./, '')
+    if (host !== 'soundcloud.com') return false
+    const parts = parsed.pathname.split('/').filter(Boolean)
+    return parts.length >= 2
+  } catch {
+    return false
+  }
+}
+
+function isPlaylistUrl(url: string): boolean {
+  try {
+    const parts = new URL(url).pathname.split('/').filter(Boolean)
+    return parts.length >= 3 && parts[1] === 'sets'
+  } catch {
+    return false
+  }
 }
 
 // ── main handler ──────────────────────────────────────────────────────────────
@@ -62,38 +79,40 @@ export async function POST(request: NextRequest) {
 
   const url = soundcloudUrl.trim()
 
+  if (!isValidSoundCloudTrackUrl(url)) {
+    return NextResponse.json(
+      { error: 'Not a valid SoundCloud URL. Paste a link like https://soundcloud.com/artist/track' },
+      { status: 400 }
+    )
+  }
+  if (isPlaylistUrl(url)) {
+    return NextResponse.json(
+      { error: 'Playlists are not supported. Please link to an individual track.' },
+      { status: 400 }
+    )
+  }
+
   const songId = uuidv4()
   const tmpDir = os.tmpdir()
   const rawPath = path.join(tmpDir, `sc_raw_${songId}`)
   const mp3Path = path.join(tmpDir, `sc_out_${songId}.mp3`)
 
   try {
-    const scdl = require('soundcloud-downloader').default
+    const { SoundCloud } = require('scdl-core')
 
-    // ── 1. Validate URL ──────────────────────────────────────────────────────
-    if (!scdl.isValidUrl(url)) {
-      return NextResponse.json(
-        { error: 'Not a valid SoundCloud URL. Paste a link like https://soundcloud.com/artist/track' },
-        { status: 400 }
-      )
-    }
-    if (scdl.isPlaylistURL(url)) {
-      return NextResponse.json(
-        { error: 'Playlists are not supported. Please link to an individual track.' },
-        { status: 400 }
-      )
-    }
+    // ── 1. Fetch client ID ────────────────────────────────────────────────────
+    await SoundCloud.connect()
 
-    // ── 2. Fetch track metadata ──────────────────────────────────────────────
+    // ── 2. Fetch track metadata ───────────────────────────────────────────────
     console.log(`[soundcloud] Fetching info for: ${url}`)
     let info: any
     try {
-      info = await scdl.getInfo(url)
+      info = await SoundCloud.tracks.getTrack(url)
     } catch (err: any) {
-      const msg: string = err?.message ?? ''
+      const msg: string = String(err?.message ?? err ?? '')
       if (/private|not found|forbidden|404/i.test(msg) || err?.response?.status === 404) {
         return NextResponse.json(
-          { error: "This track is private and can't be imported. Try uploading the MP3 directly instead." },
+          { error: "This track is private or unavailable. Try uploading the MP3 directly instead." },
           { status: 422 }
         )
       }
@@ -112,16 +131,8 @@ export async function POST(request: NextRequest) {
     const originalFilename = buildFilename(trackTitle, artistName)
     console.log(`[soundcloud] "${trackTitle}" by "${artistName}" → filename: "${originalFilename}"`)
 
-    // ── 3. Download audio stream ─────────────────────────────────────────────
-    // Try MP3 first (direct download, no conversion needed); fall back to any format
-    let audioStream: any
-    try {
-      audioStream = await scdl.downloadFormat(url, scdl.FORMATS.MP3)
-      console.log('[soundcloud] Downloading as MP3')
-    } catch {
-      audioStream = await scdl.download(url)
-      console.log('[soundcloud] Downloading as default format')
-    }
+    // ── 3. Download HLS audio stream ──────────────────────────────────────────
+    const audioStream = await SoundCloud.download(url)
 
     await new Promise<void>((resolve, reject) => {
       const ws = fs.createWriteStream(rawPath)
@@ -132,7 +143,7 @@ export async function POST(request: NextRequest) {
     })
     console.log(`[soundcloud] Downloaded ${fs.statSync(rawPath).size} bytes`)
 
-    // ── 4. Normalize to 192kbps MP3 via ffmpeg ───────────────────────────────
+    // ── 4. Normalize to 192kbps MP3 via ffmpeg ────────────────────────────────
     const ffmpegPath = getFfmpegPath()
     const ffmpeg = require('fluent-ffmpeg')
     ffmpeg.setFfmpegPath(ffmpegPath)
@@ -148,7 +159,7 @@ export async function POST(request: NextRequest) {
         .run()
     })
 
-    // ── 5. Upload to Supabase Storage ────────────────────────────────────────
+    // ── 5. Upload to Supabase Storage ─────────────────────────────────────────
     const storagePath = `originals/${user.id}/${songId}.mp3`
     const mp3Buffer = fs.readFileSync(mp3Path)
     console.log(`[soundcloud] Uploading ${mp3Buffer.length} bytes → ${storagePath}`)

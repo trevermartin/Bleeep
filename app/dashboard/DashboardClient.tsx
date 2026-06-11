@@ -655,7 +655,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                         <>
                           <p className="text-white font-medium mb-1">Paste a SoundCloud link</p>
                           <p className="text-white/40 text-sm mb-4">
-                            Works great for explicit tracks that YouTube age-restricts
+                            Paste any SoundCloud track link to import and clean it instantly
                           </p>
                           <div className="flex gap-2">
                             <input
