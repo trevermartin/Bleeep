@@ -412,6 +412,7 @@ export default function WaveformReview({
     const timeouts: ReturnType<typeof setTimeout>[] = []
 
     // Forward-declared so cleanup can call ws.un(onPlay) before onPlay is defined
+    // eslint-disable-next-line prefer-const
     let onPlay: () => void
 
     const cleanup = () => {
