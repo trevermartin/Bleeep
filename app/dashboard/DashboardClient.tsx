@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { useDropzone } from 'react-dropzone'
 import Link from 'next/link'
 import toast from 'react-hot-toast'
@@ -176,7 +176,12 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
   )
 
   // ── Review actions ──────────────────────────────────────────────────────────
+  // Ref mirrors the live word list synchronously so handleConfirm always sends
+  // the latest edits even if the React state update hasn't flushed yet.
+  const pendingWordsRef = useRef<ReviewWord[]>([])
+
   const handleWordsChange = useCallback((newWords: ReviewWord[]) => {
+    pendingWordsRef.current = newWords
     setPendingReview((prev) => prev ? { ...prev, words: newWords } : prev)
   }, [])
 
@@ -188,8 +193,13 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
     const timeoutId = setTimeout(() => controller.abort(), PROCESS_TIMEOUT_MS)
 
     try {
+      // Prefer the synchronously-updated ref over React state to avoid sending
+      // stale values if the user edited a region and clicked Finalize rapidly.
+      const liveWords = pendingWordsRef.current.length > 0
+        ? pendingWordsRef.current
+        : pendingReview.words
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const wordsToSend = pendingReview.words.map(({ id: _id, ...w }) => w)
+      const wordsToSend = liveWords.map(({ id: _id, ...w }) => w)
       console.log('[handleConfirm] Sending to /api/reprocess:', JSON.stringify(wordsToSend))
       const res = await fetch('/api/reprocess', {
         method: 'POST',
