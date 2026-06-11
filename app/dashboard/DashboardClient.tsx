@@ -60,6 +60,12 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
   const [lyricsInput, setLyricsInput] = useState('')
   const [lyricsExpanded, setLyricsExpanded] = useState(false)
 
+  // ── YouTube import state ─────────────────────────────────────────────────────
+  const [uploadTab, setUploadTab] = useState<'file' | 'youtube'>('file')
+  const [youtubeUrl, setYoutubeUrl] = useState('')
+  const [isYoutubeImporting, setIsYoutubeImporting] = useState(false)
+  const [youtubeError, setYoutubeError] = useState<string | null>(null)
+
   const FREE_LIMIT = 3
   const isPro = profile?.plan === 'pro'
   const usedThisMonth = profile?.songs_processed_this_month ?? 0
@@ -174,6 +180,103 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
     },
     [muteType, atLimit, lyricsInput]
   )
+
+  // ── YouTube import ───────────────────────────────────────────────────────────
+  const handleYoutubeImport = async () => {
+    const url = youtubeUrl.trim()
+    if (!url) return
+    if (atLimit) { toast.error("You've reached your free limit. Upgrade to Pro!"); return }
+
+    setResult(null)
+    setPendingReview(null)
+    setYoutubeError(null)
+    setIsYoutubeImporting(true)
+
+    const abortController = new AbortController()
+    const timeoutId = setTimeout(() => abortController.abort(), PROCESS_TIMEOUT_MS)
+
+    try {
+      // Step 1 — download YouTube audio and upload to Supabase
+      setStatus({ stage: 'uploading', message: 'Downloading YouTube audio…', progress: 15 })
+      const ytRes = await fetch('/api/youtube', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ youtubeUrl: url }),
+        signal: abortController.signal,
+      })
+      const ytData = await ytRes.json()
+      if (!ytRes.ok) {
+        setYoutubeError(ytData.error || 'Failed to import YouTube video')
+        setStatus(null)
+        return
+      }
+
+      // Step 2 — pass through the same pipeline as an uploaded file
+      setIsYoutubeImporting(false)
+      setIsProcessing(true)
+      setStatus({ stage: 'analyzing', message: STAGE_LABELS.analyzing, progress: 30 })
+
+      const processRes = await fetch('/api/process', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          songId: ytData.songId,
+          originalUrl: ytData.originalUrl,
+          originalFilename: ytData.originalFilename,
+          muteType,
+          manualLyrics: lyricsInput.trim() || undefined,
+        }),
+        signal: abortController.signal,
+      })
+
+      setStatus({ stage: 'processing', message: STAGE_LABELS.processing, progress: 80 })
+      const data = await processRes.json()
+
+      if (!processRes.ok) {
+        if (data.upgrade) {
+          toast.error('Monthly limit reached. Upgrade to Pro for unlimited songs.')
+        } else {
+          toast.error(data.error || 'Processing failed. Please try again.')
+        }
+        setStatus({ stage: 'failed', message: data.error || 'Processing failed', progress: 0 })
+        return
+      }
+
+      setStatus({ stage: 'complete', message: STAGE_LABELS.complete, progress: 100 })
+      const words: ReviewWord[] = (data.wordsDetected || []).map((w: DetectedWord) => ({
+        ...w,
+        id: uuidv4(),
+      }))
+      setPendingReview({
+        songId: ytData.songId,
+        originalUrl: ytData.originalUrl,
+        originalFilename: ytData.originalFilename,
+        words,
+        detectionMethod: data.detectionMethod ?? 'ai',
+      })
+      setYoutubeUrl('')
+
+      const wc = words.length
+      toast.success(
+        wc === 0
+          ? 'No profanity detected!'
+          : `Found ${wc} word${wc !== 1 ? 's' : ''} — review the list below.`
+      )
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        toast.error('Import timed out. Please try again.')
+        setStatus({ stage: 'failed', message: 'Timed out — please try again', progress: 0 })
+      } else {
+        const message = err instanceof Error ? err.message : 'An unexpected error occurred.'
+        toast.error(message)
+        setStatus({ stage: 'failed', message, progress: 0 })
+      }
+    } finally {
+      clearTimeout(timeoutId)
+      setIsYoutubeImporting(false)
+      setIsProcessing(false)
+    }
+  }
 
   // ── Review actions ──────────────────────────────────────────────────────────
   const handleWordsChange = useCallback((newWords: ReviewWord[]) => {
@@ -339,7 +442,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                   <button
                     key={type}
                     onClick={() => setMuteType(type)}
-                    disabled={isProcessing}
+                    disabled={isProcessing || isYoutubeImporting}
                     className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
                       muteType === type
                         ? 'bg-violet-600 text-white'
@@ -352,115 +455,172 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
               </div>
             </div>
 
-            {/* Dropzone */}
-            <div
-              {...getRootProps()}
-              className={`relative border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all duration-200 ${
-                atLimit
-                  ? 'border-white/10 opacity-50 cursor-not-allowed'
-                  : isDragActive
-                  ? 'border-violet-500 bg-violet-600/10 dropzone-active'
-                  : isProcessing
-                  ? 'border-violet-500/30 bg-violet-600/5 cursor-wait'
-                  : 'border-white/20 hover:border-violet-500/50 hover:bg-violet-600/5'
-              }`}
-            >
-              <input {...getInputProps()} />
+            {/* Processing / loading state — shared between file upload and YouTube import */}
+            {(isProcessing || isYoutubeImporting) ? (
+              <div className="border-2 border-violet-500/30 bg-violet-600/5 rounded-2xl p-12 text-center">
+                <div className="w-16 h-16 rounded-2xl bg-violet-600/20 flex items-center justify-center mx-auto mb-4">
+                  <div className="w-8 h-8 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
+                </div>
+                <p className="text-white font-medium mb-2">{status?.message ?? 'Importing…'}</p>
+                <div className="max-w-xs mx-auto">
+                  <div className="h-2 bg-white/10 rounded-full overflow-hidden">
+                    <div
+                      className="h-full progress-shimmer rounded-full transition-all duration-1000"
+                      style={{ width: `${status?.progress ?? 5}%` }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-xs text-white/30 mt-1">
+                    <span>Downloading</span>
+                    <span>Analyzing</span>
+                    <span>Processing</span>
+                    <span>Ready</span>
+                  </div>
+                </div>
+                <p className="text-white/30 text-xs mt-3">
+                  This can take 1–3 minutes depending on song length
+                </p>
+              </div>
+            ) : status?.stage === 'failed' ? (
+              <div className="border-2 border-dashed border-red-500/20 rounded-2xl p-12 text-center">
+                <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center mx-auto mb-4">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-8 h-8 text-red-400">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                  </svg>
+                </div>
+                <p className="text-red-400 font-medium mb-1">Processing failed</p>
+                <p className="text-white/40 text-sm mb-4">{status.message}</p>
+                <button
+                  onClick={() => { setStatus(null); setYoutubeError(null) }}
+                  className="text-violet-400 text-sm hover:text-violet-300 underline"
+                >
+                  Try again
+                </button>
+              </div>
+            ) : (
+              <>
+                {/* Tab switcher */}
+                <div className="flex mb-3 bg-white/5 border border-white/10 rounded-xl p-1 gap-1">
+                  {(['file', 'youtube'] as const).map((tab) => (
+                    <button
+                      key={tab}
+                      onClick={() => { setUploadTab(tab); setYoutubeError(null) }}
+                      className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                        uploadTab === tab
+                          ? 'bg-violet-600 text-white shadow'
+                          : 'text-white/40 hover:text-white/70'
+                      }`}
+                    >
+                      {tab === 'file' ? (
+                        <>
+                          <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                            <path d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" />
+                          </svg>
+                          Upload File
+                        </>
+                      ) : (
+                        <>
+                          <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
+                            <path d="M23.498 6.186a3.016 3.016 0 00-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 00.502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 002.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 002.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
+                          </svg>
+                          YouTube Link
+                        </>
+                      )}
+                    </button>
+                  ))}
+                </div>
 
-              {isProcessing ? (
-                <div>
-                  <div className="w-16 h-16 rounded-2xl bg-violet-600/20 flex items-center justify-center mx-auto mb-4">
-                    <div className="w-8 h-8 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
-                  </div>
-                  <p className="text-white font-medium mb-2">{status?.message}</p>
-                  <div className="max-w-xs mx-auto">
-                    <div className="h-2 bg-white/10 rounded-full overflow-hidden">
-                      <div
-                        className="h-full progress-shimmer rounded-full transition-all duration-1000"
-                        style={{ width: `${status?.progress ?? 0}%` }}
-                      />
-                    </div>
-                    <div className="flex justify-between text-xs text-white/30 mt-1">
-                      <span>Uploading</span>
-                      <span>Analyzing</span>
-                      <span>Processing</span>
-                      <span>Ready</span>
-                    </div>
-                  </div>
-                  <p className="text-white/30 text-xs mt-3">
-                    This can take 1–3 minutes depending on song length
-                  </p>
-                </div>
-              ) : status?.stage === 'failed' ? (
-                <div>
-                  <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center mx-auto mb-4">
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth={1.5}
-                      className="w-8 h-8 text-red-400"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
-                      />
-                    </svg>
-                  </div>
-                  <p className="text-red-400 font-medium mb-1">Processing failed</p>
-                  <p className="text-white/40 text-sm mb-4">{status.message}</p>
-                  <button
-                    onClick={() => setStatus(null)}
-                    className="text-violet-400 text-sm hover:text-violet-300 underline"
+                {/* File upload tab */}
+                {uploadTab === 'file' && (
+                  <div
+                    {...getRootProps()}
+                    className={`relative border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all duration-200 ${
+                      atLimit
+                        ? 'border-white/10 opacity-50 cursor-not-allowed'
+                        : isDragActive
+                        ? 'border-violet-500 bg-violet-600/10 dropzone-active'
+                        : 'border-white/20 hover:border-violet-500/50 hover:bg-violet-600/5'
+                    }`}
                   >
-                    Try again
-                  </button>
-                </div>
-              ) : (
-                <div>
-                  <div className="w-16 h-16 rounded-2xl bg-violet-600/20 flex items-center justify-center mx-auto mb-4">
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth={1.5}
-                      className="w-8 h-8 text-violet-400"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"
-                      />
-                    </svg>
+                    <input {...getInputProps()} />
+                    <div>
+                      <div className="w-16 h-16 rounded-2xl bg-violet-600/20 flex items-center justify-center mx-auto mb-4">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-8 h-8 text-violet-400">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                        </svg>
+                      </div>
+                      {atLimit ? (
+                        <>
+                          <p className="text-white font-medium mb-1">Monthly limit reached</p>
+                          <p className="text-white/40 text-sm">
+                            <Link href="/pricing" className="text-violet-400 hover:underline">Upgrade to Pro</Link>{' '}for unlimited songs
+                          </p>
+                        </>
+                      ) : isDragActive ? (
+                        <p className="text-violet-300 font-medium">Drop your song here!</p>
+                      ) : (
+                        <>
+                          <p className="text-white font-medium mb-1">Drag &amp; drop your song here</p>
+                          <p className="text-white/40 text-sm">
+                            or <span className="text-violet-400">click to browse</span> — MP3 or WAV, up to 50MB
+                          </p>
+                        </>
+                      )}
+                    </div>
                   </div>
-                  {atLimit ? (
-                    <>
-                      <p className="text-white font-medium mb-1">Monthly limit reached</p>
-                      <p className="text-white/40 text-sm">
-                        <Link href="/pricing" className="text-violet-400 hover:underline">
-                          Upgrade to Pro
-                        </Link>{' '}
-                        for unlimited songs
-                      </p>
-                    </>
-                  ) : isDragActive ? (
-                    <p className="text-violet-300 font-medium">Drop your song here!</p>
-                  ) : (
-                    <>
-                      <p className="text-white font-medium mb-1">Drag & drop your song here</p>
-                      <p className="text-white/40 text-sm">
-                        or <span className="text-violet-400">click to browse</span> — MP3 or WAV,
-                        up to 50MB
-                      </p>
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
+                )}
+
+                {/* YouTube import tab */}
+                {uploadTab === 'youtube' && (
+                  <div className="border-2 border-dashed border-white/20 hover:border-white/30 rounded-2xl p-10 transition-colors">
+                    <div className="max-w-md mx-auto text-center">
+                      <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center mx-auto mb-4">
+                        <svg viewBox="0 0 24 24" fill="currentColor" className="w-8 h-8 text-red-400">
+                          <path d="M23.498 6.186a3.016 3.016 0 00-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 00.502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 002.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 002.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
+                        </svg>
+                      </div>
+                      {atLimit ? (
+                        <>
+                          <p className="text-white font-medium mb-1">Monthly limit reached</p>
+                          <p className="text-white/40 text-sm">
+                            <Link href="/pricing" className="text-violet-400 hover:underline">Upgrade to Pro</Link>{' '}for unlimited songs
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-white font-medium mb-1">Paste a YouTube link</p>
+                          <p className="text-white/40 text-sm mb-4">
+                            We&apos;ll download the audio and run it through the same pipeline
+                          </p>
+                          <div className="flex gap-2">
+                            <input
+                              type="url"
+                              value={youtubeUrl}
+                              onChange={(e) => { setYoutubeUrl(e.target.value); setYoutubeError(null) }}
+                              onKeyDown={(e) => e.key === 'Enter' && handleYoutubeImport()}
+                              placeholder="https://youtube.com/watch?v=..."
+                              className="flex-1 bg-white/5 border border-white/15 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-violet-500/60 placeholder:text-white/25"
+                            />
+                            <button
+                              onClick={handleYoutubeImport}
+                              disabled={!youtubeUrl.trim()}
+                              className="shrink-0 bg-red-500/80 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium px-4 py-2.5 rounded-xl text-sm transition-colors"
+                            >
+                              Import &amp; Clean
+                            </button>
+                          </div>
+                          {youtubeError && (
+                            <p className="mt-2 text-red-400 text-sm">{youtubeError}</p>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
 
             {/* Manual lyrics input — expandable, hidden while processing */}
-            {!isProcessing && (
+            {!isProcessing && !isYoutubeImporting && (
               <div className="mt-3">
                 <button
                   type="button"
