@@ -182,11 +182,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'Track not found — check the URL.' }, { status: 422 })
       }
       if (status === 401 || status === 403) {
-        return NextResponse.json({ error: "This track is private and can't be imported." }, { status: 422 })
-      }
-      if (status === 401 || status === 403) {
-        // client_id rejected — hint about env var
-        return NextResponse.json({ error: `Step 2 failed — client_id rejected by SoundCloud (${status}). Set SOUNDCLOUD_CLIENT_ID env var.` }, { status: 502 })
+        return NextResponse.json({ error: `Track is private or client_id was rejected (HTTP ${status}). Set SOUNDCLOUD_CLIENT_ID env var if this keeps happening.` }, { status: 422 })
       }
       return NextResponse.json({ error: `Step 2 failed — ${msg}` }, { status: 502 })
     }
@@ -205,28 +201,43 @@ export async function POST(request: NextRequest) {
 
     // ── Step 3: Find HLS transcoding ──────────────────────────────────────────
     const transcodings: any[] = trackInfo?.media?.transcodings ?? []
+    const trackAuth: string = trackInfo?.track_authorization ?? ''
     console.log(`[soundcloud] Step 3: found ${transcodings.length} transcoding(s):`, transcodings.map((t: any) => `${t?.format?.protocol}/${t?.format?.mime_type}`))
-    const hls = transcodings.find((t: any) => t?.format?.protocol === 'hls')
+    console.log(`[soundcloud] Step 3: track_authorization present: ${!!trackAuth}`)
+    // Prefer audio/mpeg HLS (MP3); fall back to any HLS
+    const hls =
+      transcodings.find((t: any) => t?.format?.protocol === 'hls' && t?.format?.mime_type?.includes('mpeg')) ??
+      transcodings.find((t: any) => t?.format?.protocol === 'hls')
     if (!hls) {
       return NextResponse.json({ error: `No HLS stream available. Formats: ${transcodings.map((t: any) => t?.format?.protocol).join(', ')}` }, { status: 422 })
     }
+    console.log(`[soundcloud] Step 3: using transcoding ${hls.format?.protocol}/${hls.format?.mime_type}`)
 
     // ── Step 4: Get m3u8 URL ──────────────────────────────────────────────────
-    console.log(`[soundcloud] Step 4: fetching m3u8 URL from ${hls.url}`)
+    // SoundCloud requires both client_id and track_authorization on this endpoint.
+    const step4Params: Record<string, string> = { client_id: clientId }
+    if (trackAuth) step4Params.track_authorization = trackAuth
+    const step4Url = `${hls.url}?${new URLSearchParams(step4Params).toString()}`
+    console.log(`[soundcloud] Step 4: fetching m3u8 URL from ${step4Url}`)
     let m3u8Url: string
     try {
       const streamRes = await axios.get(hls.url, {
-        params: { client_id: clientId },
-        headers: SC_HEADERS,
+        params: step4Params,
+        headers: {
+          ...SC_HEADERS,
+          Authorization: `OAuth ${clientId}`,
+        },
         timeout: 10000,
       })
       m3u8Url = streamRes.data?.url
-      if (!m3u8Url) throw new Error(`No url in response: ${JSON.stringify(streamRes.data)}`)
-      console.log('[soundcloud] Got m3u8 URL:', m3u8Url.slice(0, 80) + '...')
+      if (!m3u8Url) throw new Error(`Unexpected response shape: ${JSON.stringify(streamRes.data).slice(0, 200)}`)
+      console.log('[soundcloud] Step 4: got m3u8 URL:', m3u8Url.slice(0, 80) + '...')
     } catch (err: any) {
+      const status = err?.response?.status
+      const body = err?.response?.data ? JSON.stringify(err.response.data).slice(0, 200) : ''
       const msg = err instanceof Error ? err.message : String(err)
-      console.error('[soundcloud] Step 4 FAILED (m3u8 URL):', msg)
-      return NextResponse.json({ error: `Step 4 failed — ${msg}` }, { status: 502 })
+      console.error(`[soundcloud] Step 4 FAILED (HTTP ${status}): ${msg} — body: ${body}`)
+      return NextResponse.json({ error: `Step 4 failed (HTTP ${status ?? 'no response'}) — ${msg}` }, { status: 502 })
     }
 
     // ── Step 5: ffmpeg HLS → MP3 ──────────────────────────────────────────────
