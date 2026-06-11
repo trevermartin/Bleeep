@@ -63,6 +63,8 @@ export async function POST(request: NextRequest) {
 
   if (!song) return NextResponse.json({ error: 'Song not found' }, { status: 404 })
 
+  console.log(`[reprocess] Received ${wordsDetected.length} word(s):`, JSON.stringify(wordsDetected))
+
   try {
     let cleanUrl = originalUrl
     let inputPath: string | undefined
@@ -86,6 +88,8 @@ export async function POST(request: NextRequest) {
 
       const localInput = inputPath
       const localOutput = outputPath
+
+      console.log('[reprocess] ffmpeg mute windows:', wordsDetected.map((w) => `${w.start}–${w.end}s`).join(', '))
 
       await new Promise<void>((resolve, reject) => {
         const proc = ffmpeg(localInput)

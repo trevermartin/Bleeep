@@ -188,6 +188,9 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
     const timeoutId = setTimeout(() => controller.abort(), PROCESS_TIMEOUT_MS)
 
     try {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const wordsToSend = pendingReview.words.map(({ id: _id, ...w }) => w)
+      console.log('[handleConfirm] Sending to /api/reprocess:', JSON.stringify(wordsToSend))
       const res = await fetch('/api/reprocess', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -195,9 +198,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
           songId: pendingReview.songId,
           originalUrl: pendingReview.originalUrl,
           originalFilename: pendingReview.originalFilename,
-          // strip the client-side id before sending
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          wordsDetected: pendingReview.words.map(({ id: _id, ...w }) => w),
+          wordsDetected: wordsToSend,
         }),
         signal: controller.signal,
       })

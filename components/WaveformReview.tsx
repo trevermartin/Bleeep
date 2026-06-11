@@ -280,13 +280,13 @@ export default function WaveformReview({
               const snap = wordsRef.current.map((w) => ({ ...w }))
               historyRef.current = [...historyRef.current.slice(-19), snap]
               setHistoryLength(historyRef.current.length)
-              onWordsChangeRef.current(
-                wordsRef.current.map((w) =>
-                  w.id === wordId
-                    ? { ...w, start: +region.start.toFixed(2), end: +region.end.toFixed(2) }
-                    : w
-                )
+              const draggedWords = wordsRef.current.map((w) =>
+                w.id === wordId
+                  ? { ...w, start: +region.start.toFixed(2), end: +region.end.toFixed(2) }
+                  : w
               )
+              wordsRef.current = draggedWords
+              onWordsChangeRef.current(draggedWords)
               break
             }
           }
@@ -324,9 +324,9 @@ export default function WaveformReview({
             resize: true,
           })
           regionMapRef.current.set(newWord.id, region)
-          onWordsChangeRef.current(
-            [...wordsRef.current, newWord].sort((a, b) => a.start - b.start)
-          )
+          const clickAddedWords = [...wordsRef.current, newWord].sort((a, b) => a.start - b.start)
+          wordsRef.current = clickAddedWords
+          onWordsChangeRef.current(clickAddedWords)
         })
       } catch (err) {
         if (!destroyed) {
@@ -360,6 +360,7 @@ export default function WaveformReview({
     historyRef.current = historyRef.current.slice(0, -1)
     setHistoryLength(historyRef.current.length)
     rebuildRegions(prev)
+    wordsRef.current = prev
     onWordsChangeRef.current(prev)
   }, []) // only accesses stable refs and setState setters
 
@@ -433,7 +434,9 @@ export default function WaveformReview({
       region.setOptions({ start: newStart, end: newEnd })
       programmaticRef.current = false
     }
-    onWordsChange(wordsRef.current.map((w) => w.id === id ? { ...w, start: newStart, end: newEnd } : w))
+    const newWords = wordsRef.current.map((w) => w.id === id ? { ...w, start: newStart, end: newEnd } : w)
+    wordsRef.current = newWords
+    onWordsChange(newWords)
   }
 
   // Expand (+) or shrink (−) the mute window symmetrically from its center.
@@ -453,24 +456,27 @@ export default function WaveformReview({
       region.setOptions({ start: newStart, end: newEnd })
       programmaticRef.current = false
     }
-    onWordsChange(wordsRef.current.map((w) => w.id === id ? { ...w, start: newStart, end: newEnd } : w))
+    const newWords = wordsRef.current.map((w) => w.id === id ? { ...w, start: newStart, end: newEnd } : w)
+    wordsRef.current = newWords
+    onWordsChange(newWords)
   }
 
   const removeWord = (id: string) => {
     pushHistory(wordsRef.current)
     const region = regionMapRef.current.get(id)
     if (region) { region.remove(); regionMapRef.current.delete(id) }
-    onWordsChange(wordsRef.current.filter((w) => w.id !== id))
+    const newWords = wordsRef.current.filter((w) => w.id !== id)
+    wordsRef.current = newWords
+    onWordsChange(newWords)
   }
 
   const addWord = () => {
-    if (!newWordText.trim()) { toast.error('Enter a word to add'); return }
     const t = parseTimeInput(newWordTime)
     if (isNaN(t)) { toast.error('Enter a valid time like 1:23 or 83'); return }
     pushHistory(wordsRef.current)
     const newWord: ReviewWord = {
       id: uuidv4(),
-      word: newWordText.trim().toLowerCase(),
+      word: newWordText.trim().toLowerCase() || 'new',
       start: Math.max(0, +(t - 1.0).toFixed(2)),
       end: +(t + 1.0).toFixed(2),
       mute_type: muteType,
@@ -485,7 +491,9 @@ export default function WaveformReview({
       })
       regionMapRef.current.set(newWord.id, region)
     }
-    onWordsChange([...wordsRef.current, newWord].sort((a, b) => a.start - b.start))
+    const newWords = [...wordsRef.current, newWord].sort((a, b) => a.start - b.start)
+    wordsRef.current = newWords
+    onWordsChange(newWords)
     setNewWordTime('')
     setNewWordText('')
   }
@@ -518,11 +526,11 @@ export default function WaveformReview({
       region.setOptions({ start: newStart, end: newEnd })
       programmaticRef.current = false
     }
-    onWordsChange(
-      wordsRef.current.map((w) =>
-        w.id === targetWord.id ? { ...w, start: newStart, end: newEnd } : w
-      )
+    const newWords = wordsRef.current.map((w) =>
+      w.id === targetWord.id ? { ...w, start: newStart, end: newEnd } : w
     )
+    wordsRef.current = newWords
+    onWordsChange(newWords)
   }
 
   // ── Button style helpers ──────────────────────────────────────────────────
@@ -818,7 +826,7 @@ export default function WaveformReview({
               value={newWordText}
               onChange={(e) => setNewWordText(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && addWord()}
-              placeholder="word"
+              placeholder="word (optional)"
               className="flex-1 bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-white text-xs focus:outline-none focus:border-violet-500/50"
             />
             <button
@@ -829,7 +837,7 @@ export default function WaveformReview({
             </button>
           </div>
           <p className="text-white/20 text-xs mt-1.5">
-            Format: 1:23 or 83 (seconds). Mutes ±1 second around that timestamp.
+            Timestamp required (1:23 or 83s). Word label is optional — defaults to "new".
           </p>
         </div>
 
