@@ -22,7 +22,6 @@
     "react-dropzone": "^14.4.1",
     "react-hook-form": "^7.76.0",
     "react-hot-toast": "^2.6.0",
-    "scdl-core": "^1.1.0",
     "stripe": "^14.25.0",
     "uuid": "^9.0.1",
     "wavesurfer.js": "^7.12.7"

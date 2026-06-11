@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { createClient } from '@/lib/supabase/server'
+import axios from 'axios'
 import path from 'path'
 import os from 'os'
 import fs from 'fs'
@@ -52,6 +53,62 @@ function isPlaylistUrl(url: string): boolean {
   }
 }
 
+const SC_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+}
+
+/**
+ * Extract a SoundCloud client_id by scraping the homepage for JS bundles.
+ * Falls back to SOUNDCLOUD_CLIENT_ID env var if set.
+ */
+async function getClientId(): Promise<string> {
+  if (process.env.SOUNDCLOUD_CLIENT_ID) {
+    console.log('[soundcloud] Using SOUNDCLOUD_CLIENT_ID from env')
+    return process.env.SOUNDCLOUD_CLIENT_ID
+  }
+
+  console.log('[soundcloud] Fetching homepage to extract client_id...')
+  const homeRes = await axios.get('https://soundcloud.com', {
+    headers: SC_HEADERS,
+    timeout: 12000,
+  })
+  const html: string = homeRes.data
+
+  // Collect all script bundle URLs from the page
+  const scriptUrls: string[] = []
+  const re = /<script[^>]+src="(https?:\/\/[^"]+\.js)"/g
+  let m
+  while ((m = re.exec(html)) !== null) scriptUrls.push(m[1])
+  console.log(`[soundcloud] Found ${scriptUrls.length} script(s) to scan for client_id`)
+
+  // Try multiple regex patterns against each bundle (check last scripts first — app bundle is last)
+  const patterns = [
+    /client_id:"([a-zA-Z0-9]{32})"/,
+    /client_id=([a-zA-Z0-9]{32})[^a-zA-Z0-9]/,
+    /"client_id":"([a-zA-Z0-9]{32})"/,
+  ]
+
+  for (const scriptUrl of [...scriptUrls].reverse()) {
+    try {
+      const scriptRes = await axios.get(scriptUrl, { headers: SC_HEADERS, timeout: 10000 })
+      for (const pat of patterns) {
+        const match = (scriptRes.data as string).match(pat)
+        if (match) {
+          console.log(`[soundcloud] Extracted client_id via pattern ${pat} from ${scriptUrl}`)
+          return match[1]
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[soundcloud] Script fetch failed: ${scriptUrl} — ${e?.message}`)
+    }
+  }
+
+  throw new Error(
+    `Could not extract SoundCloud client_id from ${scriptUrls.length} script(s). ` +
+    `Set SOUNDCLOUD_CLIENT_ID env var to bypass scraping.`
+  )
+}
+
 // ── main handler ──────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
@@ -94,81 +151,118 @@ export async function POST(request: NextRequest) {
 
   const songId = uuidv4()
   const tmpDir = os.tmpdir()
-  const rawPath = path.join(tmpDir, `sc_raw_${songId}`)
   const mp3Path = path.join(tmpDir, `sc_out_${songId}.mp3`)
 
   try {
-    const { SoundCloud } = require('scdl-core')
-
-    // ── 1. Fetch client ID ────────────────────────────────────────────────────
-    await SoundCloud.connect()
-
-    // ── 2. Fetch track metadata ───────────────────────────────────────────────
-    console.log(`[soundcloud] Fetching info for: ${url}`)
-    let info: any
+    // ── Step 1: Get client_id ─────────────────────────────────────────────────
+    let clientId: string
     try {
-      info = await SoundCloud.tracks.getTrack(url)
+      clientId = await getClientId()
     } catch (err: any) {
-      const msg: string = String(err?.message ?? err ?? '')
-      if (/private|not found|forbidden|404/i.test(msg) || err?.response?.status === 404) {
-        return NextResponse.json(
-          { error: "This track is private or unavailable. Try uploading the MP3 directly instead." },
-          { status: 422 }
-        )
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error('[soundcloud] Step 1 FAILED (client_id):', msg)
+      return NextResponse.json({ error: `Step 1 failed — ${msg}` }, { status: 502 })
+    }
+
+    // ── Step 2: Resolve track info ────────────────────────────────────────────
+    console.log(`[soundcloud] Step 2: resolving track info for ${url}`)
+    let trackInfo: any
+    try {
+      const res = await axios.get('https://api-v2.soundcloud.com/resolve', {
+        params: { url, client_id: clientId },
+        headers: SC_HEADERS,
+        timeout: 15000,
+      })
+      trackInfo = res.data
+    } catch (err: any) {
+      const status = err?.response?.status
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[soundcloud] Step 2 FAILED (resolve, HTTP ${status}):`, msg)
+      if (status === 404) {
+        return NextResponse.json({ error: 'Track not found — check the URL.' }, { status: 422 })
       }
-      throw err
+      if (status === 401 || status === 403) {
+        return NextResponse.json({ error: "This track is private and can't be imported." }, { status: 422 })
+      }
+      if (status === 401 || status === 403) {
+        // client_id rejected — hint about env var
+        return NextResponse.json({ error: `Step 2 failed — client_id rejected by SoundCloud (${status}). Set SOUNDCLOUD_CLIENT_ID env var.` }, { status: 502 })
+      }
+      return NextResponse.json({ error: `Step 2 failed — ${msg}` }, { status: 502 })
     }
 
-    if (info?.sharing === 'private') {
-      return NextResponse.json(
-        { error: "This track is private and can't be imported. Try uploading the MP3 directly instead." },
-        { status: 422 }
-      )
+    if (trackInfo?.sharing === 'private') {
+      return NextResponse.json({ error: "This track is private and can't be imported." }, { status: 422 })
+    }
+    if (trackInfo?.kind !== 'track') {
+      return NextResponse.json({ error: `URL resolved to a ${trackInfo?.kind ?? 'non-track'}, not a track.` }, { status: 422 })
     }
 
-    const trackTitle: string = info.title ?? 'Unknown Track'
-    const artistName: string = info.user?.username ?? info.user?.full_name ?? ''
+    const trackTitle: string = trackInfo.title ?? 'Unknown Track'
+    const artistName: string = trackInfo.user?.username ?? trackInfo.user?.full_name ?? ''
     const originalFilename = buildFilename(trackTitle, artistName)
-    console.log(`[soundcloud] "${trackTitle}" by "${artistName}" → filename: "${originalFilename}"`)
+    console.log(`[soundcloud] Track: "${trackTitle}" by "${artistName}" → "${originalFilename}"`)
 
-    // ── 3. Download HLS audio stream ──────────────────────────────────────────
-    const audioStream = await SoundCloud.download(url)
+    // ── Step 3: Find HLS transcoding ──────────────────────────────────────────
+    const transcodings: any[] = trackInfo?.media?.transcodings ?? []
+    console.log(`[soundcloud] Step 3: found ${transcodings.length} transcoding(s):`, transcodings.map((t: any) => `${t?.format?.protocol}/${t?.format?.mime_type}`))
+    const hls = transcodings.find((t: any) => t?.format?.protocol === 'hls')
+    if (!hls) {
+      return NextResponse.json({ error: `No HLS stream available. Formats: ${transcodings.map((t: any) => t?.format?.protocol).join(', ')}` }, { status: 422 })
+    }
 
-    await new Promise<void>((resolve, reject) => {
-      const ws = fs.createWriteStream(rawPath)
-      audioStream.pipe(ws)
-      ws.on('finish', resolve)
-      ws.on('error', reject)
-      audioStream.on('error', (err: Error) => reject(err))
-    })
-    console.log(`[soundcloud] Downloaded ${fs.statSync(rawPath).size} bytes`)
+    // ── Step 4: Get m3u8 URL ──────────────────────────────────────────────────
+    console.log(`[soundcloud] Step 4: fetching m3u8 URL from ${hls.url}`)
+    let m3u8Url: string
+    try {
+      const streamRes = await axios.get(hls.url, {
+        params: { client_id: clientId },
+        headers: SC_HEADERS,
+        timeout: 10000,
+      })
+      m3u8Url = streamRes.data?.url
+      if (!m3u8Url) throw new Error(`No url in response: ${JSON.stringify(streamRes.data)}`)
+      console.log('[soundcloud] Got m3u8 URL:', m3u8Url.slice(0, 80) + '...')
+    } catch (err: any) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error('[soundcloud] Step 4 FAILED (m3u8 URL):', msg)
+      return NextResponse.json({ error: `Step 4 failed — ${msg}` }, { status: 502 })
+    }
 
-    // ── 4. Normalize to 192kbps MP3 via ffmpeg ────────────────────────────────
+    // ── Step 5: ffmpeg HLS → MP3 ──────────────────────────────────────────────
+    console.log('[soundcloud] Step 5: ffmpeg HLS download + MP3 conversion...')
     const ffmpegPath = getFfmpegPath()
     const ffmpeg = require('fluent-ffmpeg')
     ffmpeg.setFfmpegPath(ffmpegPath)
 
-    await new Promise<void>((resolve, reject) => {
-      ffmpeg(rawPath)
-        .audioCodec('libmp3lame')
-        .audioBitrate('192k')
-        .format('mp3')
-        .output(mp3Path)
-        .on('end', () => { console.log('[soundcloud] ffmpeg done'); resolve() })
-        .on('error', (err: Error) => reject(new Error(`ffmpeg failed: ${err.message}`)))
-        .run()
-    })
+    try {
+      await new Promise<void>((resolve, reject) => {
+        ffmpeg(m3u8Url)
+          .inputOptions(['-allowed_extensions', 'ALL'])
+          .audioCodec('libmp3lame')
+          .audioBitrate('192k')
+          .format('mp3')
+          .output(mp3Path)
+          .on('end', () => { console.log('[soundcloud] Step 5: ffmpeg done'); resolve() })
+          .on('error', (err: Error) => reject(new Error(`Step 5 failed — ffmpeg: ${err.message}`)))
+          .run()
+      })
+    } catch (err: any) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error('[soundcloud] Step 5 FAILED (ffmpeg):', msg)
+      return NextResponse.json({ error: msg }, { status: 500 })
+    }
 
-    // ── 5. Upload to Supabase Storage ─────────────────────────────────────────
+    // ── Step 6: Upload to Supabase Storage ────────────────────────────────────
     const storagePath = `originals/${user.id}/${songId}.mp3`
     const mp3Buffer = fs.readFileSync(mp3Path)
-    console.log(`[soundcloud] Uploading ${mp3Buffer.length} bytes → ${storagePath}`)
+    console.log(`[soundcloud] Step 6: uploading ${mp3Buffer.length} bytes → ${storagePath}`)
 
     const { error: uploadErr } = await adminSupabase.storage
       .from('audio')
       .upload(storagePath, mp3Buffer, { contentType: 'audio/mpeg', upsert: false })
 
-    if (uploadErr) throw new Error(`Storage upload failed: ${uploadErr.message}`)
+    if (uploadErr) throw new Error(`Step 6 failed — storage: ${uploadErr.message}`)
 
     const { data: urlData } = adminSupabase.storage.from('audio').getPublicUrl(storagePath)
 
@@ -180,12 +274,11 @@ export async function POST(request: NextRequest) {
       trackTitle,
       artistName,
     })
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'SoundCloud import failed'
-    console.error(`[soundcloud] FAILED url=${url}:`, err)
+  } catch (err: any) {
+    const message = err instanceof Error ? err.message : String(err ?? 'SoundCloud import failed')
+    console.error(`[soundcloud] Unhandled error for url=${url}:`, err)
     return NextResponse.json({ error: message }, { status: 500 })
   } finally {
-    try { if (fs.existsSync(rawPath)) fs.unlinkSync(rawPath) } catch { /* non-fatal */ }
     try { if (fs.existsSync(mp3Path)) fs.unlinkSync(mp3Path) } catch { /* non-fatal */ }
   }
 }
