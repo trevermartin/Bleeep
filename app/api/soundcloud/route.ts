@@ -199,39 +199,41 @@ export async function POST(request: NextRequest) {
     const originalFilename = buildFilename(trackTitle, artistName)
     console.log(`[soundcloud] Track: "${trackTitle}" by "${artistName}" → "${originalFilename}"`)
 
-    // ── Step 3: Find HLS transcoding ──────────────────────────────────────────
+    // ── Step 3: Find best transcoding ────────────────────────────────────────
+    // Progressive streams only need client_id — no track_authorization JWT.
+    // HLS streams require the JWT (which 401s from server-side requests).
+    // Prefer progressive/mpeg, fall back to any progressive, then any HLS.
     const transcodings: any[] = trackInfo?.media?.transcodings ?? []
-    const trackAuth: string = trackInfo?.track_authorization ?? ''
     console.log(`[soundcloud] Step 3: found ${transcodings.length} transcoding(s):`, transcodings.map((t: any) => `${t?.format?.protocol}/${t?.format?.mime_type}`))
-    console.log(`[soundcloud] Step 3: track_authorization present: ${!!trackAuth}`)
-    // Prefer audio/mpeg HLS (MP3); fall back to any HLS
-    const hls =
+    const transcoding =
+      transcodings.find((t: any) => t?.format?.protocol === 'progressive' && t?.format?.mime_type?.includes('mpeg')) ??
+      transcodings.find((t: any) => t?.format?.protocol === 'progressive') ??
       transcodings.find((t: any) => t?.format?.protocol === 'hls' && t?.format?.mime_type?.includes('mpeg')) ??
       transcodings.find((t: any) => t?.format?.protocol === 'hls')
-    if (!hls) {
-      return NextResponse.json({ error: `No HLS stream available. Formats: ${transcodings.map((t: any) => t?.format?.protocol).join(', ')}` }, { status: 422 })
+    if (!transcoding) {
+      return NextResponse.json({ error: `No streamable transcoding found. Available: ${transcodings.map((t: any) => `${t?.format?.protocol}/${t?.format?.mime_type}`).join(', ')}` }, { status: 422 })
     }
-    console.log(`[soundcloud] Step 3: using transcoding ${hls.format?.protocol}/${hls.format?.mime_type}`)
+    const isProgressive = transcoding.format?.protocol === 'progressive'
+    console.log(`[soundcloud] Step 3: using ${transcoding.format?.protocol}/${transcoding.format?.mime_type} (progressive: ${isProgressive})`)
 
-    // ── Step 4: Get m3u8 URL ──────────────────────────────────────────────────
-    // SoundCloud requires both client_id and track_authorization on this endpoint.
+    // ── Step 4: Get stream URL ────────────────────────────────────────────────
+    // Progressive: only client_id needed. HLS: also needs track_authorization.
     const step4Params: Record<string, string> = { client_id: clientId }
-    if (trackAuth) step4Params.track_authorization = trackAuth
-    const step4Url = `${hls.url}?${new URLSearchParams(step4Params).toString()}`
-    console.log(`[soundcloud] Step 4: fetching m3u8 URL from ${step4Url}`)
-    let m3u8Url: string
+    if (!isProgressive && trackInfo?.track_authorization) {
+      step4Params.track_authorization = trackInfo.track_authorization
+    }
+    const step4Url = `${transcoding.url}?${new URLSearchParams(step4Params).toString()}`
+    console.log(`[soundcloud] Step 4: fetching stream URL from ${step4Url}`)
+    let streamUrl: string
     try {
-      const streamRes = await axios.get(hls.url, {
+      const streamRes = await axios.get(transcoding.url, {
         params: step4Params,
-        headers: {
-          ...SC_HEADERS,
-          Authorization: `OAuth ${clientId}`,
-        },
+        headers: SC_HEADERS,
         timeout: 10000,
       })
-      m3u8Url = streamRes.data?.url
-      if (!m3u8Url) throw new Error(`Unexpected response shape: ${JSON.stringify(streamRes.data).slice(0, 200)}`)
-      console.log('[soundcloud] Step 4: got m3u8 URL:', m3u8Url.slice(0, 80) + '...')
+      streamUrl = streamRes.data?.url
+      if (!streamUrl) throw new Error(`Unexpected response shape: ${JSON.stringify(streamRes.data).slice(0, 200)}`)
+      console.log(`[soundcloud] Step 4: got stream URL: ${streamUrl.slice(0, 80)}...`)
     } catch (err: any) {
       const status = err?.response?.status
       const body = err?.response?.data ? JSON.stringify(err.response.data).slice(0, 200) : ''
@@ -240,16 +242,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: `Step 4 failed (HTTP ${status ?? 'no response'}) — ${msg}` }, { status: 502 })
     }
 
-    // ── Step 5: ffmpeg HLS → MP3 ──────────────────────────────────────────────
-    console.log('[soundcloud] Step 5: ffmpeg HLS download + MP3 conversion...')
+    // ── Step 5: ffmpeg download + MP3 conversion ──────────────────────────────
+    console.log(`[soundcloud] Step 5: ffmpeg ${isProgressive ? 'progressive' : 'HLS'} → MP3...`)
     const ffmpegPath = getFfmpegPath()
     const ffmpeg = require('fluent-ffmpeg')
     ffmpeg.setFfmpegPath(ffmpegPath)
 
     try {
       await new Promise<void>((resolve, reject) => {
-        ffmpeg(m3u8Url)
-          .inputOptions(['-allowed_extensions', 'ALL'])
+        const cmd = ffmpeg(streamUrl)
+        if (!isProgressive) cmd.inputOptions(['-allowed_extensions', 'ALL'])
+        cmd
           .audioCodec('libmp3lame')
           .audioBitrate('192k')
           .format('mp3')
