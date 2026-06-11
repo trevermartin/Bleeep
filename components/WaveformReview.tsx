@@ -345,6 +345,7 @@ export default function WaveformReview({
         wsRef.current.destroy()
         wsRef.current = null
         regionsRef.current = null
+        // eslint-disable-next-line react-hooks/exhaustive-deps
         regionMapRef.current.clear()
       }
     }
@@ -837,7 +838,7 @@ export default function WaveformReview({
             </button>
           </div>
           <p className="text-white/20 text-xs mt-1.5">
-            Timestamp required (1:23 or 83s). Word label is optional — defaults to "new".
+            Timestamp required (1:23 or 83s). Word label is optional — defaults to &ldquo;new&rdquo;.
           </p>
         </div>
 
