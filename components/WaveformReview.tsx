@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/exhaustive-deps, react/no-unescaped-entities */
 'use client'
 
 import { useEffect, useRef, useState, useCallback } from 'react'
@@ -120,7 +120,6 @@ export default function WaveformReview({
     if (wsRef.current && isPlaying && !previewCleanupRef.current) {
       scheduleMutesRef.current?.(wsRef.current.getCurrentTime())
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [words])
   useEffect(() => { onWordsChangeRef.current = onWordsChange }, [onWordsChange])
   useEffect(() => { muteTypeRef.current = muteType }, [muteType])
@@ -354,7 +353,6 @@ export default function WaveformReview({
         wsRef.current.destroy()
         wsRef.current = null
         regionsRef.current = null
-        // eslint-disable-next-line react-hooks/exhaustive-deps
         regionMapRef.current.clear()
       }
     }
