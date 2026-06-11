@@ -60,11 +60,14 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
   const [lyricsInput, setLyricsInput] = useState('')
   const [lyricsExpanded, setLyricsExpanded] = useState(false)
 
-  // ── YouTube import state ─────────────────────────────────────────────────────
-  const [uploadTab, setUploadTab] = useState<'file' | 'youtube'>('file')
+  // ── Import tab state ─────────────────────────────────────────────────────────
+  const [uploadTab, setUploadTab] = useState<'file' | 'youtube' | 'soundcloud'>('file')
   const [youtubeUrl, setYoutubeUrl] = useState('')
   const [isYoutubeImporting, setIsYoutubeImporting] = useState(false)
   const [youtubeError, setYoutubeError] = useState<string | null>(null)
+  const [soundcloudUrl, setSoundcloudUrl] = useState('')
+  const [isSoundcloudImporting, setIsSoundcloudImporting] = useState(false)
+  const [soundcloudError, setSoundcloudError] = useState<string | null>(null)
 
   const FREE_LIMIT = 3
   const isPro = profile?.plan === 'pro'
@@ -278,6 +281,101 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
     }
   }
 
+  // ── SoundCloud import ────────────────────────────────────────────────────────
+  const handleSoundcloudImport = async () => {
+    const url = soundcloudUrl.trim()
+    if (!url) return
+    if (atLimit) { toast.error("You've reached your free limit. Upgrade to Pro!"); return }
+
+    setResult(null)
+    setPendingReview(null)
+    setSoundcloudError(null)
+    setIsSoundcloudImporting(true)
+
+    const abortController = new AbortController()
+    const timeoutId = setTimeout(() => abortController.abort(), PROCESS_TIMEOUT_MS)
+
+    try {
+      setStatus({ stage: 'uploading', message: 'Downloading SoundCloud audio…', progress: 15 })
+      const scRes = await fetch('/api/soundcloud', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ soundcloudUrl: url }),
+        signal: abortController.signal,
+      })
+      const scData = await scRes.json()
+      if (!scRes.ok) {
+        setSoundcloudError(scData.error || 'Failed to import SoundCloud track')
+        setStatus(null)
+        return
+      }
+
+      setIsSoundcloudImporting(false)
+      setIsProcessing(true)
+      setStatus({ stage: 'analyzing', message: STAGE_LABELS.analyzing, progress: 30 })
+
+      const processRes = await fetch('/api/process', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          songId: scData.songId,
+          originalUrl: scData.originalUrl,
+          originalFilename: scData.originalFilename,
+          muteType,
+          manualLyrics: lyricsInput.trim() || undefined,
+        }),
+        signal: abortController.signal,
+      })
+
+      setStatus({ stage: 'processing', message: STAGE_LABELS.processing, progress: 80 })
+      const data = await processRes.json()
+
+      if (!processRes.ok) {
+        if (data.upgrade) {
+          toast.error('Monthly limit reached. Upgrade to Pro for unlimited songs.')
+        } else {
+          toast.error(data.error || 'Processing failed. Please try again.')
+        }
+        setStatus({ stage: 'failed', message: data.error || 'Processing failed', progress: 0 })
+        return
+      }
+
+      setStatus({ stage: 'complete', message: STAGE_LABELS.complete, progress: 100 })
+      const words: ReviewWord[] = (data.wordsDetected || []).map((w: DetectedWord) => ({
+        ...w,
+        id: uuidv4(),
+      }))
+      setPendingReview({
+        songId: scData.songId,
+        originalUrl: scData.originalUrl,
+        originalFilename: scData.originalFilename,
+        words,
+        detectionMethod: data.detectionMethod ?? 'ai',
+      })
+      setSoundcloudUrl('')
+
+      const wc = words.length
+      toast.success(
+        wc === 0
+          ? 'No profanity detected!'
+          : `Found ${wc} word${wc !== 1 ? 's' : ''} — review the list below.`
+      )
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        toast.error('Import timed out. Please try again.')
+        setStatus({ stage: 'failed', message: 'Timed out — please try again', progress: 0 })
+      } else {
+        const message = err instanceof Error ? err.message : 'An unexpected error occurred.'
+        toast.error(message)
+        setStatus({ stage: 'failed', message, progress: 0 })
+      }
+    } finally {
+      clearTimeout(timeoutId)
+      setIsSoundcloudImporting(false)
+      setIsProcessing(false)
+    }
+  }
+
   // ── Review actions ──────────────────────────────────────────────────────────
   const handleWordsChange = useCallback((newWords: ReviewWord[]) => {
     setPendingReview((prev) => prev ? { ...prev, words: newWords } : prev)
@@ -442,7 +540,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                   <button
                     key={type}
                     onClick={() => setMuteType(type)}
-                    disabled={isProcessing || isYoutubeImporting}
+                    disabled={isProcessing || isYoutubeImporting || isSoundcloudImporting}
                     className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
                       muteType === type
                         ? 'bg-violet-600 text-white'
@@ -455,8 +553,8 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
               </div>
             </div>
 
-            {/* Processing / loading state — shared between file upload and YouTube import */}
-            {(isProcessing || isYoutubeImporting) ? (
+            {/* Processing / loading state — shared across file, YouTube, and SoundCloud imports */}
+            {(isProcessing || isYoutubeImporting || isSoundcloudImporting) ? (
               <div className="border-2 border-violet-500/30 bg-violet-600/5 rounded-2xl p-12 text-center">
                 <div className="w-16 h-16 rounded-2xl bg-violet-600/20 flex items-center justify-center mx-auto mb-4">
                   <div className="w-8 h-8 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
@@ -500,33 +598,39 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
               <>
                 {/* Tab switcher */}
                 <div className="flex mb-3 bg-white/5 border border-white/10 rounded-xl p-1 gap-1">
-                  {(['file', 'youtube'] as const).map((tab) => (
-                    <button
-                      key={tab}
-                      onClick={() => { setUploadTab(tab); setYoutubeError(null) }}
-                      className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                        uploadTab === tab
-                          ? 'bg-violet-600 text-white shadow'
-                          : 'text-white/40 hover:text-white/70'
-                      }`}
-                    >
-                      {tab === 'file' ? (
-                        <>
-                          <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                            <path d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" />
-                          </svg>
-                          Upload File
-                        </>
-                      ) : (
-                        <>
-                          <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
-                            <path d="M23.498 6.186a3.016 3.016 0 00-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 00.502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 002.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 002.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
-                          </svg>
-                          YouTube Link
-                        </>
-                      )}
-                    </button>
-                  ))}
+                  <button
+                    onClick={() => { setUploadTab('file'); setYoutubeError(null); setSoundcloudError(null) }}
+                    className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-all ${
+                      uploadTab === 'file' ? 'bg-violet-600 text-white shadow' : 'text-white/40 hover:text-white/70'
+                    }`}
+                  >
+                    <svg viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5 shrink-0">
+                      <path d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" />
+                    </svg>
+                    Upload File
+                  </button>
+                  <button
+                    onClick={() => { setUploadTab('youtube'); setYoutubeError(null); setSoundcloudError(null) }}
+                    className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-all ${
+                      uploadTab === 'youtube' ? 'bg-violet-600 text-white shadow' : 'text-white/40 hover:text-white/70'
+                    }`}
+                  >
+                    <svg viewBox="0 0 24 24" fill="currentColor" className="w-3.5 h-3.5 shrink-0">
+                      <path d="M23.498 6.186a3.016 3.016 0 00-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 00.502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 002.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 002.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
+                    </svg>
+                    YouTube
+                  </button>
+                  <button
+                    onClick={() => { setUploadTab('soundcloud'); setYoutubeError(null); setSoundcloudError(null) }}
+                    className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-all ${
+                      uploadTab === 'soundcloud' ? 'bg-violet-600 text-white shadow' : 'text-white/40 hover:text-white/70'
+                    }`}
+                  >
+                    <svg viewBox="0 0 24 24" fill="currentColor" className="w-3.5 h-3.5 shrink-0">
+                      <path d="M1.175 12.225c-.059 0-.106.045-.116.112l-.479 3.025.479 2.978c.01.067.057.112.116.112.059 0 .107-.045.115-.112l.544-2.978-.544-3.025c-.008-.067-.056-.112-.115-.112zm1.31-.544c-.069 0-.124.054-.132.122l-.416 3.569.416 3.459c.008.069.063.122.132.122.069 0 .124-.053.131-.122l.474-3.459-.474-3.569c-.007-.068-.062-.122-.131-.122zm1.35-.248c-.078 0-.142.062-.149.139l-.353 3.817.353 3.7c.007.077.071.139.149.139.078 0 .143-.062.149-.139l.4-3.7-.4-3.817c-.006-.077-.071-.139-.149-.139zm1.395.057c-.088 0-.16.07-.165.158l-.289 3.76.289 3.633c.005.088.077.158.165.158.089 0 .16-.07.165-.158l.328-3.633-.328-3.76c-.005-.088-.076-.158-.165-.158zm1.42-.156c-.097 0-.177.078-.181.174l-.226 3.916.226 3.561c.004.096.084.174.181.174.098 0 .177-.078.18-.174l.257-3.561-.257-3.916c-.003-.096-.082-.174-.18-.174zm1.448.091c-.107 0-.195.086-.198.193l-.162 3.825.162 3.489c.003.107.091.193.198.193.108 0 .196-.086.197-.193l.184-3.489-.184-3.825c-.001-.107-.089-.193-.197-.193zm1.475-.07c-.116 0-.211.093-.213.209l-.099 3.895.099 3.417c.002.116.097.209.213.209.117 0 .211-.093.213-.209l.112-3.417-.112-3.895c-.002-.116-.096-.209-.213-.209zm1.503-.116c-.126 0-.229.101-.229.226l-.036 4.011.036 3.345c0 .125.103.226.229.226.127 0 .229-.101.229-.226l.041-3.345-.041-4.011c0-.125-.102-.226-.229-.226zm1.529.045c-.135 0-.245.109-.245.243v3.966l.245 3.273c0 .134.11.243.245.243.136 0 .246-.109.245-.243l.278-3.273-.278-3.966c0-.134-.109-.243-.245-.243zm1.555-.215c-.145 0-.262.116-.262.26l0 .001-.204 4.181.204 3.201c0 .144.117.26.262.26.146 0 .263-.116.262-.26l.232-3.201-.232-4.181c0-.144-.116-.261-.262-.261zm1.58.045c-.154 0-.279.124-.279.277l-.14 4.136.14 3.129c0 .153.125.277.279.277.155 0 .28-.124.279-.277l.159-3.129-.159-4.136c0-.153-.124-.277-.279-.277zm4.098-1.127c-.201-.077-.412-.116-.627-.115-.229 0-.45.041-.659.118-.047-2.404-1.999-4.345-4.408-4.345-1.064 0-2.038.382-2.796 1.013-.29.238-.368.518-.372.793v8.619c.004.283.232.513.516.524h8.346c.57 0 1.034-.458 1.034-1.024v-3.458c0-1.204-.808-2.22-2.034-2.125z" />
+                    </svg>
+                    SoundCloud
+                  </button>
                 </div>
 
                 {/* File upload tab */}
@@ -611,6 +715,63 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                           {youtubeError && (
                             <p className="mt-2 text-red-400 text-sm">{youtubeError}</p>
                           )}
+                          <p className="mt-3 text-white/25 text-xs">
+                            Age-restricted videos can&apos;t be imported.{' '}
+                            <button
+                              onClick={() => setUploadTab('soundcloud')}
+                              className="text-violet-400/70 hover:text-violet-300 underline"
+                            >
+                              Try SoundCloud instead
+                            </button>
+                          </p>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* SoundCloud import tab */}
+                {uploadTab === 'soundcloud' && (
+                  <div className="border-2 border-dashed border-white/20 hover:border-white/30 rounded-2xl p-10 transition-colors">
+                    <div className="max-w-md mx-auto text-center">
+                      <div className="w-16 h-16 rounded-2xl bg-orange-500/10 flex items-center justify-center mx-auto mb-4">
+                        <svg viewBox="0 0 24 24" fill="currentColor" className="w-8 h-8 text-orange-400">
+                          <path d="M1.175 12.225c-.059 0-.106.045-.116.112l-.479 3.025.479 2.978c.01.067.057.112.116.112.059 0 .107-.045.115-.112l.544-2.978-.544-3.025c-.008-.067-.056-.112-.115-.112zm1.31-.544c-.069 0-.124.054-.132.122l-.416 3.569.416 3.459c.008.069.063.122.132.122.069 0 .124-.053.131-.122l.474-3.459-.474-3.569c-.007-.068-.062-.122-.131-.122zm1.35-.248c-.078 0-.142.062-.149.139l-.353 3.817.353 3.7c.007.077.071.139.149.139.078 0 .143-.062.149-.139l.4-3.7-.4-3.817c-.006-.077-.071-.139-.149-.139zm1.395.057c-.088 0-.16.07-.165.158l-.289 3.76.289 3.633c.005.088.077.158.165.158.089 0 .16-.07.165-.158l.328-3.633-.328-3.76c-.005-.088-.076-.158-.165-.158zm1.42-.156c-.097 0-.177.078-.181.174l-.226 3.916.226 3.561c.004.096.084.174.181.174.098 0 .177-.078.18-.174l.257-3.561-.257-3.916c-.003-.096-.082-.174-.18-.174zm1.448.091c-.107 0-.195.086-.198.193l-.162 3.825.162 3.489c.003.107.091.193.198.193.108 0 .196-.086.197-.193l.184-3.489-.184-3.825c-.001-.107-.089-.193-.197-.193zm1.475-.07c-.116 0-.211.093-.213.209l-.099 3.895.099 3.417c.002.116.097.209.213.209.117 0 .211-.093.213-.209l.112-3.417-.112-3.895c-.002-.116-.096-.209-.213-.209zm1.503-.116c-.126 0-.229.101-.229.226l-.036 4.011.036 3.345c0 .125.103.226.229.226.127 0 .229-.101.229-.226l.041-3.345-.041-4.011c0-.125-.102-.226-.229-.226zm1.529.045c-.135 0-.245.109-.245.243v3.966l.245 3.273c0 .134.11.243.245.243.136 0 .246-.109.245-.243l.278-3.273-.278-3.966c0-.134-.109-.243-.245-.243zm1.555-.215c-.145 0-.262.116-.262.26l0 .001-.204 4.181.204 3.201c0 .144.117.26.262.26.146 0 .263-.116.262-.26l.232-3.201-.232-4.181c0-.144-.116-.261-.262-.261zm1.58.045c-.154 0-.279.124-.279.277l-.14 4.136.14 3.129c0 .153.125.277.279.277.155 0 .28-.124.279-.277l.159-3.129-.159-4.136c0-.153-.124-.277-.279-.277zm4.098-1.127c-.201-.077-.412-.116-.627-.115-.229 0-.45.041-.659.118-.047-2.404-1.999-4.345-4.408-4.345-1.064 0-2.038.382-2.796 1.013-.29.238-.368.518-.372.793v8.619c.004.283.232.513.516.524h8.346c.57 0 1.034-.458 1.034-1.024v-3.458c0-1.204-.808-2.22-2.034-2.125z" />
+                        </svg>
+                      </div>
+                      {atLimit ? (
+                        <>
+                          <p className="text-white font-medium mb-1">Monthly limit reached</p>
+                          <p className="text-white/40 text-sm">
+                            <Link href="/pricing" className="text-violet-400 hover:underline">Upgrade to Pro</Link>{' '}for unlimited songs
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-white font-medium mb-1">Paste a SoundCloud link</p>
+                          <p className="text-white/40 text-sm mb-4">
+                            Works great for explicit tracks that YouTube age-restricts
+                          </p>
+                          <div className="flex gap-2">
+                            <input
+                              type="url"
+                              value={soundcloudUrl}
+                              onChange={(e) => { setSoundcloudUrl(e.target.value); setSoundcloudError(null) }}
+                              onKeyDown={(e) => e.key === 'Enter' && handleSoundcloudImport()}
+                              placeholder="https://soundcloud.com/artist/track"
+                              className="flex-1 bg-white/5 border border-white/15 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-orange-500/60 placeholder:text-white/25"
+                            />
+                            <button
+                              onClick={handleSoundcloudImport}
+                              disabled={!soundcloudUrl.trim()}
+                              className="shrink-0 bg-orange-500/80 hover:bg-orange-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium px-4 py-2.5 rounded-xl text-sm transition-colors"
+                            >
+                              Import &amp; Clean
+                            </button>
+                          </div>
+                          {soundcloudError && (
+                            <p className="mt-2 text-red-400 text-sm">{soundcloudError}</p>
+                          )}
                         </>
                       )}
                     </div>
@@ -620,7 +781,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
             )}
 
             {/* Manual lyrics input — expandable, hidden while processing */}
-            {!isProcessing && !isYoutubeImporting && (
+            {!isProcessing && !isYoutubeImporting && !isSoundcloudImporting && (
               <div className="mt-3">
                 <button
                   type="button"
