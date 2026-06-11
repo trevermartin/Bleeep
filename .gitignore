@@ -16,6 +16,9 @@
 # npm cache (local workaround)
 .npm-cache/
 
+# yt-dlp binary (downloaded at install time via postinstall, platform-specific)
+/bin/
+
 # misc
 .DS_Store
 *.pem

@@ -9,7 +9,8 @@ const nextConfig = {
     outputFileTracingIncludes: {
       '/api/process': ['./node_modules/ffmpeg-static/**/*'],
       '/api/reprocess': ['./node_modules/ffmpeg-static/**/*'],
-      '/api/soundcloud': ['./node_modules/ffmpeg-static/**/*'],
+      // yt-dlp binary + ffmpeg (yt-dlp calls ffmpeg via --ffmpeg-location)
+      '/api/soundcloud': ['./bin/yt-dlp', './node_modules/ffmpeg-static/**/*'],
     },
   },
 

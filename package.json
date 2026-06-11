@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "postinstall": "node scripts/download-ytdlp.mjs"
   },
   "dependencies": {
     "@stripe/stripe-js": "^2.4.0",
