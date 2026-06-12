@@ -468,7 +468,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
             <div className="flex items-center gap-4 mb-4 flex-wrap">
               <h2 className="text-white font-semibold">Clean a new song</h2>
               <div className="flex bg-white/10 rounded-lg p-1 gap-1">
-                {(['mute', 'warp'] as MuteType[]).map((type) => (
+                {(['warp', 'mute'] as MuteType[]).map((type) => (
                   <button
                     key={type}
                     onClick={() => setMuteType(type)}

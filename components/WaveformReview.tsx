@@ -47,7 +47,10 @@ function censor(word: string): string {
   return word[0] + '*'.repeat(Math.max(1, word.length - 2)) + word[word.length - 1]
 }
 
-const REGION_COLOR = 'rgba(239,68,68,0.22)'
+const MUTE_REGION_COLOR = 'rgba(239,68,68,0.22)'
+const WARP_REGION_COLOR = 'rgba(139,92,246,0.30)'
+const regionColor = (t: 'mute' | 'warp') => (t === 'warp' ? WARP_REGION_COLOR : MUTE_REGION_COLOR)
+const regionContent = (t: 'mute' | 'warp') => (t === 'warp' ? 'WARP' : undefined)
 const WS_HEIGHT_NORMAL = 80
 const WS_HEIGHT_EXPANDED = 200
 
@@ -145,7 +148,8 @@ export default function WaveformReview({
       const region = regionsRef.current.addRegion({
         start: word.start,
         end: word.end,
-        color: REGION_COLOR,
+        color: regionColor(word.mute_type),
+        content: regionContent(word.mute_type),
         drag: true,
         resize: true,
       })
@@ -198,12 +202,14 @@ export default function WaveformReview({
             const endMs = (word.end - fromTime) * 1000
             if (endMs <= 0) continue // already past end
 
+            // Warp regions duck to ~20% (a muffled preview) instead of full silence
+            const zoneVol = word.mute_type === 'warp' ? 0.2 : 0
             if (startMs <= 0) {
-              // Playback started inside a mute zone — silence immediately
-              ws.setVolume(0)
+              // Playback started inside a mute zone — duck immediately
+              ws.setVolume(zoneVol)
             } else {
               gainTimeoutsRef.current.push(
-                setTimeout(() => { if (!previewCleanupRef.current) ws.setVolume(0) }, startMs)
+                setTimeout(() => { if (!previewCleanupRef.current) ws.setVolume(zoneVol) }, startMs)
               )
             }
             gainTimeoutsRef.current.push(
@@ -222,7 +228,8 @@ export default function WaveformReview({
             const region = wsRegions.addRegion({
               start: word.start,
               end: word.end,
-              color: REGION_COLOR,
+              color: regionColor(word.mute_type),
+              content: regionContent(word.mute_type),
               drag: true,
               resize: true,
             })
@@ -319,7 +326,8 @@ export default function WaveformReview({
           const region = regionsRef.current.addRegion({
             start: newWord.start,
             end: newWord.end,
-            color: REGION_COLOR,
+            color: regionColor(newWord.mute_type),
+            content: regionContent(newWord.mute_type),
             drag: true,
             resize: true,
           })
@@ -490,7 +498,8 @@ export default function WaveformReview({
       const region = regionsRef.current.addRegion({
         start: newWord.start,
         end: newWord.end,
-        color: REGION_COLOR,
+        color: regionColor(newWord.mute_type),
+        content: regionContent(newWord.mute_type),
         drag: true,
         resize: true,
       })
