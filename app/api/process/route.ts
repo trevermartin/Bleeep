@@ -120,6 +120,7 @@ export async function POST(request: NextRequest) {
   }
 
   const { songId, originalUrl, originalFilename, muteType = 'mute' } = body
+  console.log(`[process] Received muteType="${muteType}" songId=${songId}`)
 
   if (!songId || !originalUrl || !originalFilename) {
     return NextResponse.json(

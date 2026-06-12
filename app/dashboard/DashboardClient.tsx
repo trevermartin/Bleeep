@@ -37,7 +37,7 @@ function censorDisplay(word: string): string {
 export default function DashboardClient({ profile, initialSongs, userEmail }: Props) {
   const [songs, setSongs] = useState<Song[]>(initialSongs)
   const [status, setStatus] = useState<ProcessingStatus | null>(null)
-  const [muteType, setMuteType] = useState<MuteType>('mute')
+  const [muteType, setMuteType] = useState<MuteType>('warp')
   const [result, setResult] = useState<{
     cleanUrl: string
     wordsDetected: DetectedWord[]

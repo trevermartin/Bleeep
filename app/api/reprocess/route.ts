@@ -55,6 +55,7 @@ export async function POST(request: NextRequest) {
   if (!song) return NextResponse.json({ error: 'Song not found' }, { status: 404 })
 
   console.log(`[reprocess] Received ${wordsDetected.length} word(s):`, JSON.stringify(wordsDetected))
+  console.log(`[reprocess] incoming mute_types=[${wordsDetected.map((w) => w.mute_type).join(',')}]`)
 
   try {
     let cleanUrl = originalUrl

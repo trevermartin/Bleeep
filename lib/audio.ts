@@ -39,6 +39,9 @@ export async function renderCleanAudio(opts: {
   ffmpeg.setFfmpegPath(ffmpegPath)
 
   const isWarp = words.length > 0 && words.every((w) => w.mute_type === 'warp')
+  console.log(
+    `[audio] render mode=${isWarp ? 'WARP' : 'MUTE'} words=${words.length} mute_types=[${words.map((w) => w.mute_type).join(',')}]`
+  )
 
   return new Promise<void>((resolve, reject) => {
     const proc = ffmpeg(inputPath)
@@ -54,10 +57,15 @@ export async function renderCleanAudio(opts: {
       filterGraph = `[0:a]${muteFilter}[out]`
     }
 
+    console.log(`[audio] filtergraph: ${filterGraph}`)
+
     proc
       .complexFilter(filterGraph)
       .outputOptions(['-map [out]', '-c:a libmp3lame', '-b:a 192k'])
       .output(outputPath)
+      .on('start', (cmd: string) => {
+        console.log(`[audio] ffmpeg command: ${cmd}`)
+      })
       .on('end', () => {
         console.log(`[audio] ffmpeg render complete (${isWarp ? 'warp' : 'mute'})`)
         resolve()
@@ -91,15 +99,22 @@ function buildWarpFilter(words: DetectedWord[]): string {
   parts.push(`[0:a]volume=enable='${between}':volume=0[base]`)
 
   // 2. Warp track: distort the whole mix, then silence everything *outside*
-  //    the word windows so only the obscured words bleed through.
-  //    - lowpass ~300Hz: muffles the word
+  //    the word windows so only the obscured words bleed through during them.
+  //    The chain is tuned to stay clearly AUDIBLE (a muffled, pitched-down
+  //    wobble) rather than near-silence:
   //    - asetrate*0.8 → pitch down ~3.9 semitones; aresample normalizes the
   //      rate and atempo=1.25 restores the original duration so the distorted
   //      copy stays sample-aligned with the gating windows.
-  //    - vibrato: slight speed wobble / stutter feel
+  //    - lowpass f=1800 → muffles the word but keeps it present (300Hz was so
+  //      aggressive it sounded like silence on most speakers).
+  //    - vibrato + tremolo → the speed wobble / stutter feel (Kanye "No
+  //      Mistakes" clean-version vibe).
+  //    - volume=1.8 → makeup gain so the muffled word reads at a normal level.
   parts.push(
-    `[0:a]lowpass=f=300,asetrate=44100*0.8,aresample=44100,atempo=1.25,` +
-      `vibrato=f=8:d=0.5,` +
+    `[0:a]asetrate=44100*0.8,aresample=44100,atempo=1.25,` +
+      `lowpass=f=1800,` +
+      `vibrato=f=6:d=0.8,tremolo=f=10:d=0.6,` +
+      `volume=1.8,` +
       `volume=enable='not(${between})':volume=0[warp]`
   )
 

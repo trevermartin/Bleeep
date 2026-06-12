@@ -327,6 +327,10 @@ export default function WaveformReview({
           const clickAddedWords = [...wordsRef.current, newWord].sort((a, b) => a.start - b.start)
           wordsRef.current = clickAddedWords
           onWordsChangeRef.current(clickAddedWords)
+          // Exit add-region mode after adding one region so the user isn't
+          // stuck in add mode (the "+ region" button toggles back off).
+          addModeRef.current = false
+          setAddMode(false)
         })
       } catch (err) {
         if (!destroyed) {
