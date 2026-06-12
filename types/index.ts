@@ -32,3 +32,5 @@ export interface ProcessingStatus {
 }
 
 export type MuteType = 'mute' | 'bleep'
+
+export type DetectionMethod = 'lyrics' | 'ai' | 'community'

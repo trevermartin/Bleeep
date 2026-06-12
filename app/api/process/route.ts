@@ -3,6 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin'
 import { createClient } from '@/lib/supabase/server'
 import { isProfane, WORD_BOOST } from '@/lib/profanity-list'
 import { parseFilename, fetchLrcLyrics, parseLrc, detectProfanityInLyrics } from '@/lib/lrclib'
+import { trackFingerprint } from '@/lib/fingerprint'
 import path from 'path'
 import os from 'os'
 import fs from 'fs'
@@ -150,9 +151,9 @@ export async function POST(request: NextRequest) {
   })
 
   try {
-    // ── Step 6: Detect profanity (manual lyrics → LRCLIB → AssemblyAI) ───────
+    // ── Step 6: Detect profanity (manual lyrics → community → LRCLIB → AssemblyAI) ──
     let detectedWords: DetectedWord[] = []
-    let detectionMethod: 'lyrics' | 'ai' = 'ai'
+    let detectionMethod: 'lyrics' | 'ai' | 'community' = 'ai'
 
     // 6a. Manual lyrics pasted by the user — highest priority
     const manualLyrics = body.manualLyrics
@@ -170,7 +171,39 @@ export async function POST(request: NextRequest) {
     const parsed = parseFilename(originalFilename)
     console.log(`[process] Filename → artist="${parsed.artist}" track="${parsed.track}"`)
 
-    // 6b. LRCLIB (if no manual lyrics)
+    // 6b. Community timestamp library — timestamps confirmed by 2+ other users
+    //     let us skip LRCLIB/AssemblyAI entirely
+    if (detectionMethod === 'ai') try {
+      const fingerprint = trackFingerprint(parsed.artist, parsed.track)
+      const { data: communityRows, error: communityErr } = await adminSupabase
+        .from('song_timestamps')
+        .select('timestamps, confidence_score, created_at')
+        .eq('track_fingerprint', fingerprint)
+        .order('confidence_score', { ascending: false })
+        .order('created_at', { ascending: false })
+
+      if (communityErr) {
+        console.warn('[process] Community lookup failed:', communityErr.message)
+      } else if (communityRows && communityRows.length >= 2) {
+        const saved = (communityRows[0].timestamps ?? []) as DetectedWord[]
+        detectedWords = saved.map((w) => ({
+          ...w,
+          mute_type: muteType as 'mute' | 'bleep',
+        }))
+        detectionMethod = 'community'
+        console.log(
+          `[process] Community match: ${communityRows.length} confirmations for "${fingerprint}" → ${detectedWords.length} word(s)`
+        )
+      } else {
+        console.log(
+          `[process] Community: ${communityRows?.length ?? 0} match(es) for "${fingerprint}" — need 2+, continuing`
+        )
+      }
+    } catch (communityErr) {
+      console.warn('[process] Community lookup failed:', communityErr)
+    }
+
+    // 6c. LRCLIB (if no manual lyrics or community match)
     if (detectionMethod === 'ai') try {
       const lrcText = await fetchLrcLyrics(parsed.artist, parsed.track)
       if (lrcText) {
@@ -229,7 +262,7 @@ export async function POST(request: NextRequest) {
         }))
     }
 
-    console.log(`[process] ${detectionMethod === 'lyrics' ? 'Lyrics' : 'AI'} detected ${detectedWords.length} profane word(s)`)
+    console.log(`[process] Detection (${detectionMethod}) found ${detectedWords.length} profane word(s)`)
 
     // ── Step 8: Process audio with ffmpeg (only if profanity was found) ───────
     let cleanUrl = originalUrl

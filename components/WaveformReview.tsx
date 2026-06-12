@@ -19,7 +19,7 @@ interface Props {
   audioUrl: string
   originalFilename: string
   words: ReviewWord[]
-  detectionMethod: 'lyrics' | 'ai'
+  detectionMethod: 'lyrics' | 'ai' | 'community'
   muteType: 'mute' | 'bleep'
   isReprocessing: boolean
   onWordsChange: (words: ReviewWord[]) => void
@@ -549,7 +549,11 @@ export default function WaveformReview({
           <div>
             <h3 className="text-white font-semibold flex items-center gap-2">
               Review detected words
-              {detectionMethod === 'lyrics' ? (
+              {detectionMethod === 'community' ? (
+                <span className="text-xs font-normal bg-violet-500/20 text-violet-300 border border-violet-500/30 px-2 py-0.5 rounded-full">
+                  Community verified ✓
+                </span>
+              ) : detectionMethod === 'lyrics' ? (
                 <span className="text-xs font-normal bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full">
                   Lyrics-assisted
                 </span>

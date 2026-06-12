@@ -8,7 +8,7 @@ import { v4 as uuidv4 } from 'uuid'
 import dynamic from 'next/dynamic'
 import Navbar from '@/components/Navbar'
 import { createClient } from '@/lib/supabase/client'
-import type { Profile, Song, DetectedWord, ProcessingStatus, MuteType } from '@/types'
+import type { Profile, Song, DetectedWord, ProcessingStatus, MuteType, DetectionMethod } from '@/types'
 import type { ReviewWord } from '@/components/WaveformReview'
 
 const WaveformReview = dynamic(() => import('@/components/WaveformReview'), { ssr: false })
@@ -42,7 +42,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
     cleanUrl: string
     wordsDetected: DetectedWord[]
     songId: string
-    detectionMethod: 'lyrics' | 'ai'
+    detectionMethod: DetectionMethod
   } | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
 
@@ -52,7 +52,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
     originalUrl: string
     originalFilename: string
     words: ReviewWord[]
-    detectionMethod: 'lyrics' | 'ai'
+    detectionMethod: DetectionMethod
   } | null>(null)
   const [isReprocessing, setIsReprocessing] = useState(false)
 
@@ -815,7 +815,11 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
               <h3 className="text-white font-semibold flex items-center gap-2">
                 <span className="w-2 h-2 bg-green-400 rounded-full" />
                 Processing complete
-                {result.detectionMethod === 'lyrics' ? (
+                {result.detectionMethod === 'community' ? (
+                  <span className="text-xs font-normal bg-violet-500/20 text-violet-300 border border-violet-500/30 px-2 py-0.5 rounded-full">
+                    Community verified ✓
+                  </span>
+                ) : result.detectionMethod === 'lyrics' ? (
                   <span className="text-xs font-normal bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full">
                     Lyrics-assisted
                   </span>

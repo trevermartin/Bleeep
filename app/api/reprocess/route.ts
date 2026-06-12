@@ -6,6 +6,8 @@ import os from 'os'
 import fs from 'fs'
 import { execSync } from 'child_process'
 import type { DetectedWord } from '@/types'
+import { parseFilename } from '@/lib/lrclib'
+import { trackFingerprint } from '@/lib/fingerprint'
 
 export const maxDuration = 300
 
@@ -162,6 +164,30 @@ export async function POST(request: NextRequest) {
       .from('songs')
       .update({ clean_url: cleanUrl, words_detected: wordsDetected, status: 'complete' })
       .eq('id', songId)
+
+    // Contribute the user-confirmed timestamps to the community library.
+    // Upsert: re-finalizing the same track replaces this user's entry.
+    if (wordsDetected.length > 0) {
+      try {
+        const parsed = parseFilename(originalFilename)
+        const fingerprint = trackFingerprint(parsed.artist, parsed.track)
+        const { error: tsErr } = await adminSupabase
+          .from('song_timestamps')
+          .upsert(
+            {
+              track_fingerprint: fingerprint,
+              timestamps: wordsDetected,
+              source_user_id: user.id,
+              confidence_score: 1.0,
+            },
+            { onConflict: 'track_fingerprint,source_user_id' }
+          )
+        if (tsErr) console.warn('[reprocess] Community timestamp save failed:', tsErr.message)
+        else console.log(`[reprocess] Community timestamps saved for "${fingerprint}"`)
+      } catch (tsErr) {
+        console.warn('[reprocess] Community timestamp save failed:', tsErr)
+      }
+    }
 
     try {
       if (inputPath && fs.existsSync(inputPath)) fs.unlinkSync(inputPath)
