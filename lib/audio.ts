@@ -15,72 +15,51 @@ export function getFfmpegPath(): string {
 }
 
 /**
- * Render the clean MP3 with the given words silenced (or bleeped).
+ * Render the clean MP3 with the given words muted or warped.
  *
- * Plain mode (`inputPath`): filters apply to the whole mix, so muted
- * sections go fully silent.
+ * Mute mode: the word's timestamp region goes fully silent.
  *
- * Stem mode (`vocalsPath` + `instrumentalPath`, from Demucs): filters apply
- * only to the vocal stem, then the untouched instrumental is mixed back in —
- * the beat plays through uninterrupted during muted sections.
+ * Warp mode: instead of silence, the word region is distorted so the
+ * background music stays audible but the word itself is obscured — a
+ * low-pass muffle + pitch shift down + a stutter wobble, inspired by the
+ * clean-version effect on Kanye's "No Mistakes". The distortion applies
+ * ONLY to detected-word regions; the rest of the song is untouched.
  */
 export async function renderCleanAudio(opts: {
   words: DetectedWord[]
   outputPath: string
   inputPath?: string
-  vocalsPath?: string
-  instrumentalPath?: string
 }): Promise<void> {
-  const { words, outputPath, inputPath, vocalsPath, instrumentalPath } = opts
-  const useStems = Boolean(vocalsPath && instrumentalPath)
-  const primaryInput = useStems ? vocalsPath! : inputPath
-  if (!primaryInput) throw new Error('renderCleanAudio: no input provided')
+  const { words, outputPath, inputPath } = opts
+  if (!inputPath) throw new Error('renderCleanAudio: no input provided')
 
   const ffmpegPath = getFfmpegPath()
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const ffmpeg = require('fluent-ffmpeg')
   ffmpeg.setFfmpegPath(ffmpegPath)
 
-  const isBleep = words.length > 0 && words.every((w) => w.mute_type === 'bleep')
-
-  const muteFilter = words
-    .map((w) => `volume=enable='between(t,${w.start},${w.end})':volume=0`)
-    .join(',')
+  const isWarp = words.length > 0 && words.every((w) => w.mute_type === 'warp')
 
   return new Promise<void>((resolve, reject) => {
-    const proc = ffmpeg(primaryInput)
-    if (useStems) proc.input(instrumentalPath!)
+    const proc = ffmpeg(inputPath)
+    let filterGraph: string
 
-    // [0:a] = vocals (stem mode) or full mix (plain mode), with words silenced
-    const filters: string[] = [`[0:a]${muteFilter}[silenced]`]
-    const mixInputs: string[] = ['[silenced]']
-    if (useStems) mixInputs.push('[1:a]')
-
-    if (isBleep) {
-      // Overlay a 1kHz tone over each silenced word
-      words.forEach((w, i) => {
-        const dur = Math.max(0.05, w.end - w.start)
-        filters.push(
-          `sine=frequency=1000:duration=${dur}[beep${i}raw]`,
-          `[beep${i}raw]adelay=${Math.round(w.start * 1000)}|${Math.round(w.start * 1000)}[bleep${i}]`
-        )
-        mixInputs.push(`[bleep${i}]`)
-      })
-    }
-
-    if (mixInputs.length > 1) {
-      filters.push(`${mixInputs.join('')}amix=inputs=${mixInputs.length}:normalize=0[out]`)
+    if (isWarp) {
+      filterGraph = buildWarpFilter(words)
     } else {
-      // Mute-only on a single input — no mixing needed
-      filters[0] = `[0:a]${muteFilter}[out]`
+      // Mute mode — silence each detected word region on the full mix
+      const muteFilter = words
+        .map((w) => `volume=enable='between(t,${w.start},${w.end})':volume=0`)
+        .join(',')
+      filterGraph = `[0:a]${muteFilter}[out]`
     }
 
     proc
-      .complexFilter(filters.join(';'))
+      .complexFilter(filterGraph)
       .outputOptions(['-map [out]', '-c:a libmp3lame', '-b:a 192k'])
       .output(outputPath)
       .on('end', () => {
-        console.log(`[audio] ffmpeg render complete (${useStems ? 'stems' : 'plain'}, ${isBleep ? 'bleep' : 'mute'})`)
+        console.log(`[audio] ffmpeg render complete (${isWarp ? 'warp' : 'mute'})`)
         resolve()
       })
       .on('error', (err: Error) => {
@@ -89,6 +68,45 @@ export async function renderCleanAudio(opts: {
       })
       .run()
   })
+}
+
+/**
+ * Build the Warp filter graph: split the mix into a clean copy and a distorted
+ * copy, then crossfade between them so the distorted version is only heard
+ * during the detected-word windows.
+ *
+ *   [0:a] --> [base]   (original, silenced during word windows)
+ *         --> [warp]   (distorted everywhere, gated to only word windows)
+ *   amix([base] + [warp]) => [out]
+ */
+function buildWarpFilter(words: DetectedWord[]): string {
+  // Window expression that is true (1) only inside any detected word region.
+  const between = words
+    .map((w) => `between(t,${w.start},${w.end})`)
+    .join('+')
+
+  const parts: string[] = []
+
+  // 1. Base track: original audio, silenced *inside* the word windows.
+  parts.push(`[0:a]volume=enable='${between}':volume=0[base]`)
+
+  // 2. Warp track: distort the whole mix, then silence everything *outside*
+  //    the word windows so only the obscured words bleed through.
+  //    - lowpass ~300Hz: muffles the word
+  //    - asetrate*0.8 → pitch down ~3.9 semitones; aresample normalizes the
+  //      rate and atempo=1.25 restores the original duration so the distorted
+  //      copy stays sample-aligned with the gating windows.
+  //    - vibrato: slight speed wobble / stutter feel
+  parts.push(
+    `[0:a]lowpass=f=300,asetrate=44100*0.8,aresample=44100,atempo=1.25,` +
+      `vibrato=f=8:d=0.5,` +
+      `volume=enable='not(${between})':volume=0[warp]`
+  )
+
+  // 3. Mix the two gated tracks back into a single stream.
+  parts.push(`[base][warp]amix=inputs=2:normalize=0[out]`)
+
+  return parts.join(';')
 }
 
 /** Download a remote file to a local path. */

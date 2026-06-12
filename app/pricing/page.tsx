@@ -10,14 +10,14 @@ import Footer from '@/components/Footer'
 const FREE_FEATURES = [
   '3 songs per month',
   'MP3 and WAV support',
-  'Mute or bleep options',
+  'Mute or warp options',
   'Download clean version',
 ]
 
 const PRO_FEATURES = [
   'Unlimited songs per month',
   'MP3 and WAV support',
-  'Mute or bleep options',
+  'Mute or warp options',
   'Download clean version',
   'Priority processing',
   'Full song history',
@@ -27,7 +27,7 @@ const COMPARISON = [
   { feature: 'Songs per month', free: '3', pro: 'Unlimited' },
   { feature: 'File formats', free: 'MP3, WAV', pro: 'MP3, WAV' },
   { feature: 'Mute option', free: true, pro: true },
-  { feature: 'Bleep option', free: true, pro: true },
+  { feature: 'Warp option', free: true, pro: true },
   { feature: 'Download clean file', free: true, pro: true },
   { feature: 'Song history', free: false, pro: true },
   { feature: 'Priority processing', free: false, pro: true },

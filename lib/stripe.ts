@@ -10,7 +10,7 @@ export const PLANS = {
     features: [
       '3 songs per month',
       'MP3 and WAV support',
-      'Mute or bleep options',
+      'Mute or warp options',
       'Download clean version',
     ],
   },
@@ -22,7 +22,7 @@ export const PLANS = {
     features: [
       'Unlimited songs per month',
       'MP3 and WAV support',
-      'Mute or bleep options',
+      'Mute or warp options',
       'Download clean version',
       'Priority processing',
       'Song history',

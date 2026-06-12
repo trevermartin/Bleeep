@@ -12,7 +12,7 @@ export type ReviewWord = {
   word: string
   start: number
   end: number
-  mute_type: 'mute' | 'bleep'
+  mute_type: 'mute' | 'warp'
 }
 
 interface Props {
@@ -20,7 +20,7 @@ interface Props {
   originalFilename: string
   words: ReviewWord[]
   detectionMethod: 'lyrics' | 'ai' | 'community'
-  muteType: 'mute' | 'bleep'
+  muteType: 'mute' | 'warp'
   isReprocessing: boolean
   onWordsChange: (words: ReviewWord[]) => void
   onConfirm: () => void

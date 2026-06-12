@@ -109,7 +109,7 @@ export function parseLrc(lrcText: string): LrcLine[] {
  */
 export function detectProfanityInLyrics(
   lines: LrcLine[],
-  muteType: 'mute' | 'bleep'
+  muteType: 'mute' | 'warp'
 ): DetectedWord[] {
   const detected: DetectedWord[] = []
 

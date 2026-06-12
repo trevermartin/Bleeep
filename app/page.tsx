@@ -33,7 +33,7 @@ const steps = [
     ),
     step: '03',
     title: 'Download your clean version',
-    desc: 'Choose to mute or bleep each word. Download your clean MP3 instantly.',
+    desc: 'Choose to mute or warp each word. Download your clean MP3 instantly.',
   },
 ]
 
@@ -47,8 +47,8 @@ const faqs = [
     a: 'We use AssemblyAI — one of the most accurate speech-to-text APIs available — with a comprehensive profanity word list and word boosting to maximize detection accuracy.',
   },
   {
-    q: 'What is the difference between Mute and Bleep?',
-    a: 'Mute replaces the profane word with silence. Bleep replaces it with a 1kHz beep tone, like you would hear on TV.',
+    q: 'What is the difference between Mute and Warp?',
+    a: 'Mute replaces the profane word with silence. Warp distorts just the word — a muffled, pitched-down wobble — so the background music keeps playing while the word itself is obscured.',
   },
   {
     q: 'How long does processing take?',
@@ -131,7 +131,7 @@ export default function LandingPage() {
             <div className="space-y-2 mb-4">
               {[
                 { word: 'f**k', time: '0:43', type: 'muted' },
-                { word: 's**t', time: '1:12', type: 'bleeped' },
+                { word: 's**t', time: '1:12', type: 'warped' },
                 { word: 'b***h', time: '2:07', type: 'muted' },
               ].map((item, i) => (
                 <div key={i} className="flex items-center gap-3 bg-white/5 rounded-lg px-4 py-2">
@@ -192,7 +192,7 @@ export default function LandingPage() {
                 </div>
               </div>
               <ul className="space-y-3 mb-8">
-                {['3 songs per month', 'MP3 & WAV support', 'Mute or bleep options', 'Download clean version'].map((f) => (
+                {['3 songs per month', 'MP3 & WAV support', 'Mute or warp options', 'Download clean version'].map((f) => (
                   <li key={f} className="flex items-center gap-3 text-white/70 text-sm">
                     <svg className="w-4 h-4 text-violet-400 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
                       <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
@@ -218,7 +218,7 @@ export default function LandingPage() {
                 </div>
               </div>
               <ul className="space-y-3 mb-8">
-                {['Unlimited songs per month', 'MP3 & WAV support', 'Mute or bleep options', 'Download clean version', 'Priority processing', 'Full song history'].map((f) => (
+                {['Unlimited songs per month', 'MP3 & WAV support', 'Mute or warp options', 'Download clean version', 'Priority processing', 'Full song history'].map((f) => (
                   <li key={f} className="flex items-center gap-3 text-white/70 text-sm">
                     <svg className="w-4 h-4 text-violet-400 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
                       <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />

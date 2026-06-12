@@ -44,12 +44,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
   }
 
-  // Verify the song belongs to this user (and grab Demucs stems if present).
-  // select('*') instead of naming columns so this doesn't 404 if the
-  // vocal-isolation migration hasn't been run yet.
+  // Verify the song belongs to this user
   const { data: song } = await adminSupabase
     .from('songs')
-    .select('*')
+    .select('id')
     .eq('id', songId)
     .eq('user_id', user.id)
     .single()
@@ -67,39 +65,18 @@ export async function POST(request: NextRequest) {
       const outputPath = path.join(tmpDir, `bleeep_repr_out_${songId}.mp3`)
       tmpFiles.push(outputPath)
 
-      console.log('[reprocess] ffmpeg mute windows:', wordsDetected.map((w) => `${w.start}–${w.end}s`).join(', '))
+      console.log('[reprocess] ffmpeg windows:', wordsDetected.map((w) => `${w.start}–${w.end}s`).join(', '))
 
-      // Demucs stems saved during /api/process: mute the vocals only and mix
-      // the untouched instrumental back in. Otherwise process the full mix.
-      const stemVocalsUrl: string | null = song.vocals_url ?? null
-      const stemInstrumentalUrl: string | null = song.instrumental_url ?? null
-      let vocalsPath: string | undefined
-      let instrumentalPath: string | undefined
-      let inputPath: string | undefined
-
-      if (stemVocalsUrl && stemInstrumentalUrl) {
-        console.log('[reprocess] Using Demucs stems (vocal isolation)')
-        vocalsPath = path.join(tmpDir, `bleeep_repr_vocals_${songId}.mp3`)
-        instrumentalPath = path.join(tmpDir, `bleeep_repr_instr_${songId}.mp3`)
-        tmpFiles.push(vocalsPath, instrumentalPath)
-        await Promise.all([
-          downloadToFile(stemVocalsUrl, vocalsPath),
-          downloadToFile(stemInstrumentalUrl, instrumentalPath),
-        ])
-      } else {
-        const ext = path.extname(originalFilename) || '.mp3'
-        inputPath = path.join(tmpDir, `bleeep_repr_${songId}${ext}`)
-        tmpFiles.push(inputPath)
-        console.log(`[reprocess] Downloading audio: ${originalUrl}`)
-        await downloadToFile(originalUrl, inputPath)
-      }
+      const ext = path.extname(originalFilename) || '.mp3'
+      const inputPath = path.join(tmpDir, `bleeep_repr_${songId}${ext}`)
+      tmpFiles.push(inputPath)
+      console.log(`[reprocess] Downloading audio: ${originalUrl}`)
+      await downloadToFile(originalUrl, inputPath)
 
       await renderCleanAudio({
         words: wordsDetected,
         outputPath,
         inputPath,
-        vocalsPath,
-        instrumentalPath,
       })
 
       // Upload — upsert:true since a clean file may already exist from the initial process run

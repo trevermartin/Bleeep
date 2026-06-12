@@ -11,7 +11,7 @@ export interface DetectedWord {
   word: string
   start: number  // seconds
   end: number    // seconds
-  mute_type: 'mute' | 'bleep'
+  mute_type: 'mute' | 'warp'
 }
 
 export interface Song {
@@ -20,8 +20,6 @@ export interface Song {
   original_filename: string
   original_url: string
   clean_url: string | null
-  vocals_url: string | null
-  instrumental_url: string | null
   words_detected: DetectedWord[] | null
   status: 'processing' | 'complete' | 'failed'
   created_at: string
@@ -33,6 +31,6 @@ export interface ProcessingStatus {
   progress: number  // 0–100
 }
 
-export type MuteType = 'mute' | 'bleep'
+export type MuteType = 'mute' | 'warp'
 
 export type DetectionMethod = 'lyrics' | 'ai' | 'community'

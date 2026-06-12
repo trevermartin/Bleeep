@@ -4,7 +4,6 @@ import { createClient } from '@/lib/supabase/server'
 import { isProfane, WORD_BOOST } from '@/lib/profanity-list'
 import { parseFilename, fetchLrcLyrics, parseLrc, detectProfanityInLyrics } from '@/lib/lrclib'
 import { trackFingerprint } from '@/lib/fingerprint'
-import { separateVocals } from '@/lib/replicate'
 import { renderCleanAudio, downloadToFile } from '@/lib/audio'
 import path from 'path'
 import os from 'os'
@@ -112,7 +111,6 @@ export async function POST(request: NextRequest) {
     originalFilename: string
     muteType: string
     manualLyrics?: string
-    vocalIsolation?: boolean
   }
 
   try {
@@ -122,7 +120,6 @@ export async function POST(request: NextRequest) {
   }
 
   const { songId, originalUrl, originalFilename, muteType = 'mute' } = body
-  const vocalIsolation = body.vocalIsolation === true
 
   if (!songId || !originalUrl || !originalFilename) {
     return NextResponse.json(
@@ -151,7 +148,7 @@ export async function POST(request: NextRequest) {
     if (manualLyrics && manualLyrics.trim()) {
       const lines = parseLrc(manualLyrics)
       if (lines.length > 0) {
-        detectedWords = detectProfanityInLyrics(lines, muteType as 'mute' | 'bleep')
+        detectedWords = detectProfanityInLyrics(lines, muteType as 'mute' | 'warp')
         detectionMethod = 'lyrics'
         console.log(`[process] Manual LRC: ${lines.length} lines, ${detectedWords.length} profane`)
       } else {
@@ -179,7 +176,7 @@ export async function POST(request: NextRequest) {
         const saved = (communityRows[0].timestamps ?? []) as DetectedWord[]
         detectedWords = saved.map((w) => ({
           ...w,
-          mute_type: muteType as 'mute' | 'bleep',
+          mute_type: muteType as 'mute' | 'warp',
         }))
         detectionMethod = 'community'
         console.log(
@@ -199,7 +196,7 @@ export async function POST(request: NextRequest) {
       const lrcText = await fetchLrcLyrics(parsed.artist, parsed.track)
       if (lrcText) {
         const lines = parseLrc(lrcText)
-        detectedWords = detectProfanityInLyrics(lines, muteType as 'mute' | 'bleep')
+        detectedWords = detectProfanityInLyrics(lines, muteType as 'mute' | 'warp')
         detectionMethod = 'lyrics'
         console.log(`[process] Lyrics route: ${lines.length} lines, ${detectedWords.length} profane found`)
       } else {
@@ -249,7 +246,7 @@ export async function POST(request: NextRequest) {
           word: w.text,
           start: w.start / 1000, // ms → seconds
           end: w.end / 1000,
-          mute_type: muteType as 'mute' | 'bleep',
+          mute_type: muteType as 'mute' | 'warp',
         }))
     }
 
@@ -264,73 +261,18 @@ export async function POST(request: NextRequest) {
       const outputPath = path.join(tmpDir, `bleeep_output_${songId}.mp3`)
       tmpFiles.push(outputPath)
 
-      // 8a. Vocal isolation via Replicate Demucs (optional). On any failure we
-      //     fall back to full-mix processing rather than failing the job.
-      let vocalsPath: string | undefined
-      let instrumentalPath: string | undefined
+      // 8a. Download the full mix to /tmp
+      const ext = path.extname(originalFilename) || '.mp3'
+      const inputPath = path.join(tmpDir, `bleeep_input_${songId}${ext}`)
+      tmpFiles.push(inputPath)
+      console.log(`[process] Downloading audio for ffmpeg: ${originalUrl}`)
+      await downloadToFile(originalUrl, inputPath)
 
-      console.log(`[process] vocalIsolation=${vocalIsolation} REPLICATE_API_TOKEN=${process.env.REPLICATE_API_TOKEN ? 'set' : 'MISSING'}`)
-
-      if (vocalIsolation && !process.env.REPLICATE_API_TOKEN) {
-        console.warn('[process] Vocal isolation requested but REPLICATE_API_TOKEN is not set — skipping')
-      } else if (vocalIsolation) {
-        try {
-          console.log(`[process] Vocal isolation: sending ${originalUrl.slice(0, 100)} to Replicate Demucs...`)
-          const stems = await separateVocals(originalUrl)
-
-          vocalsPath = path.join(tmpDir, `bleeep_vocals_${songId}.mp3`)
-          instrumentalPath = path.join(tmpDir, `bleeep_instr_${songId}.mp3`)
-          tmpFiles.push(vocalsPath, instrumentalPath)
-          await Promise.all([
-            downloadToFile(stems.vocalsUrl, vocalsPath),
-            downloadToFile(stems.instrumentalUrl, instrumentalPath),
-          ])
-
-          // Persist stems to storage so /api/reprocess (after waveform review)
-          // can reuse them without running Demucs a second time
-          const vocalsStorage = `stems/${user.id}/${songId}_vocals.mp3`
-          const instrStorage = `stems/${user.id}/${songId}_instrumental.mp3`
-          const [vUp, iUp] = await Promise.all([
-            adminSupabase.storage.from('audio').upload(vocalsStorage, fs.readFileSync(vocalsPath), { contentType: 'audio/mpeg', upsert: true }),
-            adminSupabase.storage.from('audio').upload(instrStorage, fs.readFileSync(instrumentalPath), { contentType: 'audio/mpeg', upsert: true }),
-          ])
-          if (vUp.error || iUp.error) {
-            console.warn('[process] Stem upload failed:', vUp.error?.message ?? iUp.error?.message)
-          } else {
-            const vocalsUrl = adminSupabase.storage.from('audio').getPublicUrl(vocalsStorage).data.publicUrl
-            const instrumentalUrl = adminSupabase.storage.from('audio').getPublicUrl(instrStorage).data.publicUrl
-            const { error: stemDbErr } = await adminSupabase
-              .from('songs')
-              .update({ vocals_url: vocalsUrl, instrumental_url: instrumentalUrl })
-              .eq('id', songId)
-            if (stemDbErr) console.warn('[process] Stem URL save failed (run migration_vocal_isolation.sql?):', stemDbErr.message)
-          }
-          console.log('[process] Vocal isolation complete — muting vocals only')
-        } catch (demucsErr) {
-          const demucsMsg = demucsErr instanceof Error ? demucsErr.message : String(demucsErr)
-          console.error(`[process] Vocal isolation FAILED (falling back to full-mix): ${demucsMsg}`)
-          vocalsPath = undefined
-          instrumentalPath = undefined
-        }
-      }
-
-      // 8b. Without stems, download the full mix to /tmp
-      let inputPath: string | undefined
-      if (!vocalsPath || !instrumentalPath) {
-        const ext = path.extname(originalFilename) || '.mp3'
-        inputPath = path.join(tmpDir, `bleeep_input_${songId}${ext}`)
-        tmpFiles.push(inputPath)
-        console.log(`[process] Downloading audio for ffmpeg: ${originalUrl}`)
-        await downloadToFile(originalUrl, inputPath)
-      }
-
-      // 8c. Render: mute/bleep the words (vocals-only when stems are present)
+      // 8b. Render: mute or warp the detected words
       await renderCleanAudio({
         words: detectedWords,
         outputPath,
         inputPath,
-        vocalsPath,
-        instrumentalPath,
       })
 
       // Upload clean file to Supabase
