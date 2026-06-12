@@ -6,6 +6,10 @@
 
 const REPLICATE_API = 'https://api.replicate.com/v1'
 
+// Pinned version hash of cjwbw/demucs — this model needs an explicit version
+// on the /predictions endpoint (the model-predictions endpoint 404s for it).
+const DEMUCS_VERSION = '25a173108cff36ef9f80f854c162d01df9e6528be175794b81158fa03836d953'
+
 interface PredictionResponse {
   id: string
   status: 'starting' | 'processing' | 'succeeded' | 'failed' | 'canceled'
@@ -17,8 +21,7 @@ interface PredictionResponse {
  * Separate a track into vocals + instrumental via Replicate Demucs.
  * Returns Replicate-hosted URLs for the two stems (valid ~1 hour).
  *
- * Uses the /models/{owner}/{name}/predictions endpoint directly —
- * no version-hash lookup needed, which was the previous failure point.
+ * Uses the /predictions endpoint with a pinned version hash (DEMUCS_VERSION).
  */
 export async function separateVocals(
   audioUrl: string
@@ -28,13 +31,14 @@ export async function separateVocals(
 
   console.log(`[replicate] Token present (${token.length} chars). Submitting demucs for: ${audioUrl.slice(0, 100)}`)
 
-  const createRes = await fetch(`${REPLICATE_API}/models/cjwbw/demucs/predictions`, {
+  const createRes = await fetch(`${REPLICATE_API}/predictions`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: `Token ${token}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
+      version: DEMUCS_VERSION,
       input: {
         audio: audioUrl,
         // Two-stem mode: returns "vocals" + "no_vocals" (instrumental) URLs
@@ -65,7 +69,7 @@ export async function separateVocals(
     await new Promise((r) => setTimeout(r, 3000))
 
     const pollRes = await fetch(`${REPLICATE_API}/predictions/${initial.id}`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Token ${token}` },
     })
     if (!pollRes.ok) throw new Error(`Replicate poll failed: HTTP ${pollRes.status}`)
     const pred = (await pollRes.json()) as PredictionResponse
