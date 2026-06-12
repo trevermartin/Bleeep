@@ -269,11 +269,13 @@ export async function POST(request: NextRequest) {
       let vocalsPath: string | undefined
       let instrumentalPath: string | undefined
 
+      console.log(`[process] vocalIsolation=${vocalIsolation} REPLICATE_API_TOKEN=${process.env.REPLICATE_API_TOKEN ? 'set' : 'MISSING'}`)
+
       if (vocalIsolation && !process.env.REPLICATE_API_TOKEN) {
         console.warn('[process] Vocal isolation requested but REPLICATE_API_TOKEN is not set — skipping')
       } else if (vocalIsolation) {
         try {
-          console.log('[process] Vocal isolation: sending to Replicate Demucs...')
+          console.log(`[process] Vocal isolation: sending ${originalUrl.slice(0, 100)} to Replicate Demucs...`)
           const stems = await separateVocals(originalUrl)
 
           vocalsPath = path.join(tmpDir, `bleeep_vocals_${songId}.mp3`)
@@ -305,7 +307,8 @@ export async function POST(request: NextRequest) {
           }
           console.log('[process] Vocal isolation complete — muting vocals only')
         } catch (demucsErr) {
-          console.warn('[process] Vocal isolation failed — falling back to full-mix processing:', demucsErr)
+          const demucsMsg = demucsErr instanceof Error ? demucsErr.message : String(demucsErr)
+          console.error(`[process] Vocal isolation FAILED (falling back to full-mix): ${demucsMsg}`)
           vocalsPath = undefined
           instrumentalPath = undefined
         }
