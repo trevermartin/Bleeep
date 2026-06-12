@@ -1,5 +1,5 @@
 /**
- * Replicate-hosted Demucs (https://replicate.com/adirik/demucs) for vocal
+ * Replicate-hosted Demucs (https://replicate.com/cjwbw/demucs) for vocal
  * isolation. Demucs can't run on Vercel directly (model weights too large),
  * so we send the audio URL to Replicate and poll for the separated stems.
  */
@@ -28,7 +28,7 @@ export async function separateVocals(
 
   console.log(`[replicate] Token present (${token.length} chars). Submitting demucs for: ${audioUrl.slice(0, 100)}`)
 
-  const createRes = await fetch(`${REPLICATE_API}/models/adirik/demucs/predictions`, {
+  const createRes = await fetch(`${REPLICATE_API}/models/cjwbw/demucs/predictions`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -37,10 +37,8 @@ export async function separateVocals(
     body: JSON.stringify({
       input: {
         audio: audioUrl,
-        model_name: 'htdemucs',
-        // Two-stem mode: returns "vocals" + "no_vocals" keys in output
-        stem: 'vocals',
-        output_format: 'mp3',
+        // Two-stem mode: returns "vocals" + "no_vocals" (instrumental) URLs
+        two_stems: 'vocals',
       },
     }),
   })
