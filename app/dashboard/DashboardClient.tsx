@@ -66,6 +66,8 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
   const [isSoundcloudImporting, setIsSoundcloudImporting] = useState(false)
   const [soundcloudError, setSoundcloudError] = useState<string | null>(null)
   const [howToExpanded, setHowToExpanded] = useState(false)
+  const [scSearchQuery, setScSearchQuery] = useState('')
+  const [isScSearching, setIsScSearching] = useState(false)
 
   const FREE_LIMIT = 3
   const isPro = profile?.plan === 'pro'
@@ -181,6 +183,35 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
     },
     [muteType, atLimit, lyricsInput]
   )
+
+  // ── SoundCloud search ────────────────────────────────────────────────────────
+  const handleSoundcloudSearch = async () => {
+    const query = scSearchQuery.trim()
+    if (!query || isScSearching) return
+
+    setSoundcloudError(null)
+    setIsScSearching(true)
+    try {
+      const res = await fetch('/api/soundcloud/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setSoundcloudError(data.error || 'Search failed. Please try again.')
+        return
+      }
+      setSoundcloudUrl(data.url)
+      toast.success(
+        data.artist ? `Found "${data.title}" by ${data.artist}` : `Found "${data.title}"`
+      )
+    } catch (err) {
+      setSoundcloudError(err instanceof Error ? err.message : 'Search failed.')
+    } finally {
+      setIsScSearching(false)
+    }
+  }
 
   // ── SoundCloud import ────────────────────────────────────────────────────────
   const handleSoundcloudImport = async () => {
@@ -653,10 +684,43 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                         </>
                       ) : (
                         <>
-                          <p className="text-white font-medium mb-1">Paste a SoundCloud link</p>
+                          <p className="text-white font-medium mb-1">Import from SoundCloud</p>
                           <p className="text-white/40 text-sm mb-4">
-                            Paste any SoundCloud track link to import and clean it instantly
+                            Search for a song or paste a SoundCloud track link
                           </p>
+                          <div className="flex gap-2 mb-3">
+                            <input
+                              type="text"
+                              value={scSearchQuery}
+                              onChange={(e) => { setScSearchQuery(e.target.value); setSoundcloudError(null) }}
+                              onKeyDown={(e) => e.key === 'Enter' && handleSoundcloudSearch()}
+                              placeholder="Search by song name or artist…"
+                              className="flex-1 bg-white/5 border border-white/15 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-orange-500/60 placeholder:text-white/25"
+                            />
+                            <button
+                              onClick={handleSoundcloudSearch}
+                              disabled={!scSearchQuery.trim() || isScSearching}
+                              className="shrink-0 bg-white/10 hover:bg-white/15 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium px-4 py-2.5 rounded-xl text-sm transition-colors flex items-center gap-1.5"
+                            >
+                              {isScSearching ? (
+                                <>
+                                  <span className="w-3.5 h-3.5 border-2 border-white/60 border-t-transparent rounded-full animate-spin" />
+                                  Searching…
+                                </>
+                              ) : (
+                                <>
+                                  <svg viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+                                    <path
+                                      fillRule="evenodd"
+                                      d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z"
+                                      clipRule="evenodd"
+                                    />
+                                  </svg>
+                                  Search
+                                </>
+                              )}
+                            </button>
+                          </div>
                           <div className="flex gap-2">
                             <input
                               type="url"

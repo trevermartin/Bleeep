@@ -5,24 +5,12 @@ import { createClient } from '@/lib/supabase/server'
 import path from 'path'
 import os from 'os'
 import fs from 'fs'
-import { execSync, spawn } from 'child_process'
 import { v4 as uuidv4 } from 'uuid'
+import { getYtDlpPath, getFfmpegDir, runYtDlp } from '@/lib/ytdlp'
 
 export const maxDuration = 300
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-function getYtDlpPath(): string {
-  const bin = path.join(process.cwd(), 'bin', 'yt-dlp')
-  try { execSync(`chmod +x "${bin}"`, { stdio: 'ignore' }) } catch { /* already executable */ }
-  return bin
-}
-
-function getFfmpegDir(): string {
-  const ffmpegBin: string = require('ffmpeg-static')
-  try { execSync(`chmod +x "${ffmpegBin}"`, { stdio: 'ignore' }) } catch { /* already executable */ }
-  return path.dirname(ffmpegBin)
-}
 
 function sanitize(s: string): string {
   return s.replace(/[/\\?%*:|"<>]/g, '').replace(/\s+/g, ' ').trim()
@@ -56,28 +44,6 @@ function isPlaylistUrl(url: string): boolean {
   } catch {
     return false
   }
-}
-
-/**
- * Run yt-dlp with the given args. Resolves with { stdout, stderr } on exit 0.
- * Rejects with an Error containing the last 800 chars of stderr on non-zero exit.
- */
-function runYtDlp(ytdlpPath: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    console.log(`[soundcloud] yt-dlp ${args.join(' ')}`)
-    const proc = spawn(ytdlpPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    let stdout = ''
-    let stderr = ''
-    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString() })
-    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString() })
-    proc.on('close', (code) => {
-      if (code === 0) return resolve({ stdout, stderr })
-      // Surface a clean error from yt-dlp's stderr
-      const tail = stderr.slice(-800).trim()
-      reject(new Error(tail || `yt-dlp exited with code ${code}`))
-    })
-    proc.on('error', (err) => reject(new Error(`Failed to start yt-dlp: ${err.message}`)))
-  })
 }
 
 // ── main handler ──────────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ const nextConfig = {
       '/api/reprocess': ['./node_modules/ffmpeg-static/**/*'],
       // yt-dlp binary + ffmpeg (yt-dlp calls ffmpeg via --ffmpeg-location)
       '/api/soundcloud': ['./bin/yt-dlp', './node_modules/ffmpeg-static/**/*'],
+      '/api/soundcloud/search': ['./bin/yt-dlp', './node_modules/ffmpeg-static/**/*'],
     },
   },
 
