@@ -4,23 +4,12 @@ import { createClient } from '@/lib/supabase/server'
 import path from 'path'
 import os from 'os'
 import fs from 'fs'
-import { execSync } from 'child_process'
 import type { DetectedWord } from '@/types'
 import { parseFilename } from '@/lib/lrclib'
 import { trackFingerprint } from '@/lib/fingerprint'
+import { renderCleanAudio, downloadToFile } from '@/lib/audio'
 
 export const maxDuration = 300
-
-function getFfmpegPath(): string {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const ffmpegPath: string = require('ffmpeg-static')
-  try {
-    execSync(`chmod +x "${ffmpegPath}"`, { stdio: 'ignore' })
-  } catch {
-    // already executable
-  }
-  return ffmpegPath
-}
 
 export async function POST(request: NextRequest) {
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
@@ -55,10 +44,12 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
   }
 
-  // Verify the song belongs to this user
+  // Verify the song belongs to this user (and grab Demucs stems if present).
+  // select('*') instead of naming columns so this doesn't 404 if the
+  // vocal-isolation migration hasn't been run yet.
   const { data: song } = await adminSupabase
     .from('songs')
-    .select('id')
+    .select('*')
     .eq('id', songId)
     .eq('user_id', user.id)
     .single()
@@ -69,83 +60,51 @@ export async function POST(request: NextRequest) {
 
   try {
     let cleanUrl = originalUrl
-    let inputPath: string | undefined
-    let outputPath: string | undefined
+    const tmpFiles: string[] = []
 
     if (wordsDetected.length > 0) {
       const tmpDir = os.tmpdir()
-      const ext = path.extname(originalFilename) || '.mp3'
-      inputPath = path.join(tmpDir, `bleeep_repr_${songId}${ext}`)
-      outputPath = path.join(tmpDir, `bleeep_repr_out_${songId}.mp3`)
-
-      console.log(`[reprocess] Downloading audio: ${originalUrl}`)
-      const audioRes = await fetch(originalUrl)
-      if (!audioRes.ok) throw new Error(`Failed to download audio: HTTP ${audioRes.status}`)
-      fs.writeFileSync(inputPath, Buffer.from(await audioRes.arrayBuffer()))
-
-      const ffmpegPath = getFfmpegPath()
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const ffmpeg = require('fluent-ffmpeg')
-      ffmpeg.setFfmpegPath(ffmpegPath)
-
-      const localInput = inputPath
-      const localOutput = outputPath
+      const outputPath = path.join(tmpDir, `bleeep_repr_out_${songId}.mp3`)
+      tmpFiles.push(outputPath)
 
       console.log('[reprocess] ffmpeg mute windows:', wordsDetected.map((w) => `${w.start}–${w.end}s`).join(', '))
 
-      await new Promise<void>((resolve, reject) => {
-        const proc = ffmpeg(localInput)
-        const isBleep = wordsDetected.every((w) => w.mute_type === 'bleep')
+      // Demucs stems saved during /api/process: mute the vocals only and mix
+      // the untouched instrumental back in. Otherwise process the full mix.
+      const stemVocalsUrl: string | null = song.vocals_url ?? null
+      const stemInstrumentalUrl: string | null = song.instrumental_url ?? null
+      let vocalsPath: string | undefined
+      let instrumentalPath: string | undefined
+      let inputPath: string | undefined
 
-        if (isBleep) {
-          const muteFilter = wordsDetected
-            .map((w) => `volume=enable='between(t,${w.start},${w.end})':volume=0`)
-            .join(',')
+      if (stemVocalsUrl && stemInstrumentalUrl) {
+        console.log('[reprocess] Using Demucs stems (vocal isolation)')
+        vocalsPath = path.join(tmpDir, `bleeep_repr_vocals_${songId}.mp3`)
+        instrumentalPath = path.join(tmpDir, `bleeep_repr_instr_${songId}.mp3`)
+        tmpFiles.push(vocalsPath, instrumentalPath)
+        await Promise.all([
+          downloadToFile(stemVocalsUrl, vocalsPath),
+          downloadToFile(stemInstrumentalUrl, instrumentalPath),
+        ])
+      } else {
+        const ext = path.extname(originalFilename) || '.mp3'
+        inputPath = path.join(tmpDir, `bleeep_repr_${songId}${ext}`)
+        tmpFiles.push(inputPath)
+        console.log(`[reprocess] Downloading audio: ${originalUrl}`)
+        await downloadToFile(originalUrl, inputPath)
+      }
 
-          const bleepFilters: string[] = []
-          const bleepLabels: string[] = []
-          wordsDetected.forEach((w, i) => {
-            const dur = Math.max(0.05, w.end - w.start)
-            bleepFilters.push(
-              `sine=frequency=1000:duration=${dur}[beep${i}raw]`,
-              `[beep${i}raw]adelay=${Math.round(w.start * 1000)}|${Math.round(w.start * 1000)}[bleep${i}]`
-            )
-            bleepLabels.push(`[bleep${i}]`)
-          })
-
-          const allInputs = ['[silenced]', ...bleepLabels]
-          const complexFilter = [
-            `[0:a]${muteFilter}[silenced]`,
-            ...bleepFilters,
-            `${allInputs.join('')}amix=inputs=${allInputs.length}:normalize=0[out]`,
-          ].join(';')
-
-          proc
-            .complexFilter(complexFilter)
-            .outputOptions(['-map [out]', '-c:a libmp3lame', '-b:a 192k'])
-            .output(localOutput)
-            .on('end', () => { console.log('[reprocess] bleep done'); resolve() })
-            .on('error', (err: Error) => reject(new Error(`ffmpeg failed: ${err.message}`)))
-            .run()
-        } else {
-          const muteFilter = wordsDetected
-            .map((w) => `volume=enable='between(t,${w.start},${w.end})':volume=0`)
-            .join(',')
-
-          proc
-            .audioFilters(muteFilter)
-            .audioCodec('libmp3lame')
-            .audioBitrate('192k')
-            .output(localOutput)
-            .on('end', () => { console.log('[reprocess] mute done'); resolve() })
-            .on('error', (err: Error) => reject(new Error(`ffmpeg failed: ${err.message}`)))
-            .run()
-        }
+      await renderCleanAudio({
+        words: wordsDetected,
+        outputPath,
+        inputPath,
+        vocalsPath,
+        instrumentalPath,
       })
 
       // Upload — upsert:true since a clean file may already exist from the initial process run
       const cleanStoragePath = `clean/${user.id}/${songId}_clean.mp3`
-      const cleanBuffer = fs.readFileSync(localOutput)
+      const cleanBuffer = fs.readFileSync(outputPath)
       console.log(`[reprocess] Uploading clean file (${cleanBuffer.length} bytes)`)
 
       const { error: uploadErr } = await adminSupabase.storage
@@ -190,8 +149,7 @@ export async function POST(request: NextRequest) {
     }
 
     try {
-      if (inputPath && fs.existsSync(inputPath)) fs.unlinkSync(inputPath)
-      if (outputPath && fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
+      for (const f of tmpFiles) if (fs.existsSync(f)) fs.unlinkSync(f)
     } catch {
       // non-fatal
     }

@@ -20,6 +20,8 @@ export interface Song {
   original_filename: string
   original_url: string
   clean_url: string | null
+  vocals_url: string | null
+  instrumental_url: string | null
   words_detected: DetectedWord[] | null
   status: 'processing' | 'complete' | 'failed'
   created_at: string

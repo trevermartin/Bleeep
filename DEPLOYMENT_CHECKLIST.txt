@@ -146,3 +146,19 @@ Then run:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ALL DONE! Your app is live.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 11 — COMMUNITY TIMESTAMPS + VOCAL ISOLATION (added June 2026)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Run two new migrations in Supabase SQL Editor (same as Step 2):
+   - puretune/supabase/migration_community_timestamps.sql
+   - puretune/supabase/migration_vocal_isolation.sql
+
+2. Get a Replicate API token for vocal isolation (Demucs):
+   - Go to https://replicate.com and sign up
+   - Go to Account → API tokens → create a token
+   - Add it in Vercel → Settings → Environment Variables:
+       REPLICATE_API_TOKEN=r8_...
+   - Redeploy after adding the variable
+   (Without this token the app still works — vocal isolation
+    quietly falls back to normal full-mix muting.)

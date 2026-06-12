@@ -38,6 +38,8 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
   const [songs, setSongs] = useState<Song[]>(initialSongs)
   const [status, setStatus] = useState<ProcessingStatus | null>(null)
   const [muteType, setMuteType] = useState<MuteType>('mute')
+  // Vocal isolation (Replicate Demucs) — ON by default for Pro users
+  const [vocalIsolation, setVocalIsolation] = useState(profile?.plan === 'pro')
   const [result, setResult] = useState<{
     cleanUrl: string
     wordsDetected: DetectedWord[]
@@ -119,18 +121,33 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
 
         setStatus({ stage: 'analyzing', message: STAGE_LABELS.analyzing, progress: 30 })
 
-        const res = await fetch('/api/process', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            songId,
-            originalUrl,
-            originalFilename: file.name,
-            muteType,
-            manualLyrics: lyricsInput.trim() || undefined,
-          }),
-          signal: abortController.signal,
-        })
+        // With vocal isolation on, the server spends most of its time in
+        // Demucs — surface that as its own progress step partway through
+        let vocalsTimer: ReturnType<typeof setTimeout> | undefined
+        if (vocalIsolation) {
+          vocalsTimer = setTimeout(() => {
+            setStatus({ stage: 'analyzing', message: 'Processing vocals…', progress: 55 })
+          }, 20_000)
+        }
+
+        let res: Response
+        try {
+          res = await fetch('/api/process', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              songId,
+              originalUrl,
+              originalFilename: file.name,
+              muteType,
+              manualLyrics: lyricsInput.trim() || undefined,
+              vocalIsolation,
+            }),
+            signal: abortController.signal,
+          })
+        } finally {
+          if (vocalsTimer) clearTimeout(vocalsTimer)
+        }
 
         setStatus({ stage: 'processing', message: STAGE_LABELS.processing, progress: 80 })
 
@@ -181,7 +198,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
         setIsProcessing(false)
       }
     },
-    [muteType, atLimit, lyricsInput]
+    [muteType, atLimit, lyricsInput, vocalIsolation]
   )
 
   // ── SoundCloud search ────────────────────────────────────────────────────────
@@ -246,18 +263,31 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
       setIsProcessing(true)
       setStatus({ stage: 'analyzing', message: STAGE_LABELS.analyzing, progress: 30 })
 
-      const processRes = await fetch('/api/process', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          songId: scData.songId,
-          originalUrl: scData.originalUrl,
-          originalFilename: scData.originalFilename,
-          muteType,
-          manualLyrics: lyricsInput.trim() || undefined,
-        }),
-        signal: abortController.signal,
-      })
+      let vocalsTimer: ReturnType<typeof setTimeout> | undefined
+      if (vocalIsolation) {
+        vocalsTimer = setTimeout(() => {
+          setStatus({ stage: 'analyzing', message: 'Processing vocals…', progress: 55 })
+        }, 20_000)
+      }
+
+      let processRes: Response
+      try {
+        processRes = await fetch('/api/process', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            songId: scData.songId,
+            originalUrl: scData.originalUrl,
+            originalFilename: scData.originalFilename,
+            muteType,
+            manualLyrics: lyricsInput.trim() || undefined,
+            vocalIsolation,
+          }),
+          signal: abortController.signal,
+        })
+      } finally {
+        if (vocalsTimer) clearTimeout(vocalsTimer)
+      }
 
       setStatus({ stage: 'processing', message: STAGE_LABELS.processing, progress: 80 })
       const data = await processRes.json()
@@ -465,7 +495,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
         {/* Upload zone — hidden while reviewing */}
         {!pendingReview && (
           <div className="mb-8">
-            <div className="flex items-center gap-4 mb-4">
+            <div className="flex items-center gap-4 mb-4 flex-wrap">
               <h2 className="text-white font-semibold">Clean a new song</h2>
               <div className="flex bg-white/10 rounded-lg p-1 gap-1">
                 {(['mute', 'bleep'] as MuteType[]).map((type) => (
@@ -483,6 +513,30 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                   </button>
                 ))}
               </div>
+              <label className="flex items-center gap-2 cursor-pointer select-none ml-auto">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={vocalIsolation}
+                  onClick={() => setVocalIsolation(!vocalIsolation)}
+                  disabled={isProcessing || isSoundcloudImporting}
+                  className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${
+                    vocalIsolation ? 'bg-violet-600' : 'bg-white/15'
+                  }`}
+                >
+                  <span
+                    className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-all ${
+                      vocalIsolation ? 'left-[18px]' : 'left-0.5'
+                    }`}
+                  />
+                </button>
+                <span
+                  className="text-xs text-white/50"
+                  onClick={() => !isProcessing && !isSoundcloudImporting && setVocalIsolation(!vocalIsolation)}
+                >
+                  Vocal isolation <span className="text-white/30">(better quality, ~30s longer)</span>
+                </span>
+              </label>
             </div>
 
             {/* Processing / loading state — shared across file and SoundCloud imports */}
