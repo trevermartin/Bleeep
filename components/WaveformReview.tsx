@@ -50,7 +50,6 @@ function censor(word: string): string {
 const MUTE_REGION_COLOR = 'rgba(239,68,68,0.22)'
 const WARP_REGION_COLOR = 'rgba(139,92,246,0.30)'
 const regionColor = (t: 'mute' | 'warp') => (t === 'warp' ? WARP_REGION_COLOR : MUTE_REGION_COLOR)
-const regionContent = (t: 'mute' | 'warp') => (t === 'warp' ? 'WARP' : undefined)
 const WS_HEIGHT_NORMAL = 80
 const WS_HEIGHT_EXPANDED = 200
 
@@ -149,7 +148,6 @@ export default function WaveformReview({
         start: word.start,
         end: word.end,
         color: regionColor(word.mute_type),
-        content: regionContent(word.mute_type),
         drag: true,
         resize: true,
       })
@@ -229,7 +227,6 @@ export default function WaveformReview({
               start: word.start,
               end: word.end,
               color: regionColor(word.mute_type),
-              content: regionContent(word.mute_type),
               drag: true,
               resize: true,
             })
@@ -327,7 +324,6 @@ export default function WaveformReview({
             start: newWord.start,
             end: newWord.end,
             color: regionColor(newWord.mute_type),
-            content: regionContent(newWord.mute_type),
             drag: true,
             resize: true,
           })
@@ -499,7 +495,6 @@ export default function WaveformReview({
         start: newWord.start,
         end: newWord.end,
         color: regionColor(newWord.mute_type),
-        content: regionContent(newWord.mute_type),
         drag: true,
         resize: true,
       })

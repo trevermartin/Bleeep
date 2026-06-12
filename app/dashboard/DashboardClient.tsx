@@ -66,7 +66,10 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
   const [isSoundcloudImporting, setIsSoundcloudImporting] = useState(false)
   const [soundcloudError, setSoundcloudError] = useState<string | null>(null)
   const [howToExpanded, setHowToExpanded] = useState(false)
-  const [scSearchQuery, setScSearchQuery] = useState('')
+  const [scSong, setScSong] = useState('')
+  const [scArtist, setScArtist] = useState('')
+  const [scAlbum, setScAlbum] = useState('')
+  const [geniusLyrics, setGeniusLyrics] = useState<string | null>(null)
   const [isScSearching, setIsScSearching] = useState(false)
 
   const FREE_LIMIT = 3
@@ -186,16 +189,19 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
 
   // ── SoundCloud search ────────────────────────────────────────────────────────
   const handleSoundcloudSearch = async () => {
-    const query = scSearchQuery.trim()
-    if (!query || isScSearching) return
+    const song = scSong.trim()
+    const artist = scArtist.trim()
+    const album = scAlbum.trim()
+    if (!song || !artist || isScSearching) return
 
     setSoundcloudError(null)
+    setGeniusLyrics(null)
     setIsScSearching(true)
     try {
       const res = await fetch('/api/soundcloud/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query }),
+        body: JSON.stringify({ song, artist, album: album || undefined }),
       })
       const data = await res.json()
       if (!res.ok) {
@@ -203,8 +209,10 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
         return
       }
       setSoundcloudUrl(data.url)
+      setGeniusLyrics(data.geniusLyrics ?? null)
       toast.success(
-        data.artist ? `Found "${data.title}" by ${data.artist}` : `Found "${data.title}"`
+        (data.artist ? `Found "${data.title}" by ${data.artist}` : `Found "${data.title}"`) +
+          (data.geniusLyrics ? ' · lyrics matched' : '')
       )
     } catch (err) {
       setSoundcloudError(err instanceof Error ? err.message : 'Search failed.')
@@ -255,6 +263,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
           originalFilename: scData.originalFilename,
           muteType,
           manualLyrics: lyricsInput.trim() || undefined,
+          geniusLyrics: geniusLyrics || undefined,
         }),
         signal: abortController.signal,
       })
@@ -285,6 +294,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
         detectionMethod: data.detectionMethod ?? 'ai',
       })
       setSoundcloudUrl('')
+      setGeniusLyrics(null)
 
       const wc = words.length
       toast.success(
@@ -686,20 +696,38 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                         <>
                           <p className="text-white font-medium mb-1">Import from SoundCloud</p>
                           <p className="text-white/40 text-sm mb-4">
-                            Search for a song or paste a SoundCloud track link
+                            Enter the song details to search, or paste a SoundCloud track link
                           </p>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2 text-left">
+                            <input
+                              type="text"
+                              value={scSong}
+                              onChange={(e) => { setScSong(e.target.value); setSoundcloudError(null) }}
+                              onKeyDown={(e) => e.key === 'Enter' && handleSoundcloudSearch()}
+                              placeholder="Song name *"
+                              className="bg-white/5 border border-white/15 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-orange-500/60 placeholder:text-white/40"
+                            />
+                            <input
+                              type="text"
+                              value={scArtist}
+                              onChange={(e) => { setScArtist(e.target.value); setSoundcloudError(null) }}
+                              onKeyDown={(e) => e.key === 'Enter' && handleSoundcloudSearch()}
+                              placeholder="Artist *"
+                              className="bg-white/5 border border-white/15 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-orange-500/60 placeholder:text-white/40"
+                            />
+                          </div>
                           <div className="flex gap-2 mb-3">
                             <input
                               type="text"
-                              value={scSearchQuery}
-                              onChange={(e) => { setScSearchQuery(e.target.value); setSoundcloudError(null) }}
+                              value={scAlbum}
+                              onChange={(e) => { setScAlbum(e.target.value); setSoundcloudError(null) }}
                               onKeyDown={(e) => e.key === 'Enter' && handleSoundcloudSearch()}
-                              placeholder="Search by song name or artist…"
-                              className="flex-1 bg-white/5 border border-white/15 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-orange-500/60 placeholder:text-white/25"
+                              placeholder="Album (optional)"
+                              className="flex-1 bg-white/5 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-orange-500/40 placeholder:text-white/20"
                             />
                             <button
                               onClick={handleSoundcloudSearch}
-                              disabled={!scSearchQuery.trim() || isScSearching}
+                              disabled={!scSong.trim() || !scArtist.trim() || isScSearching}
                               className="shrink-0 bg-white/10 hover:bg-white/15 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium px-4 py-2.5 rounded-xl text-sm transition-colors flex items-center gap-1.5"
                             >
                               {isScSearching ? (

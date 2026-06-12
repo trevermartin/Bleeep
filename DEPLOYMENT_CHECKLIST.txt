@@ -162,3 +162,19 @@ STEP 11 — COMMUNITY TIMESTAMPS + VOCAL ISOLATION (added June 2026)
    - Redeploy after adding the variable
    (Without this token the app still works — vocal isolation
     quietly falls back to normal full-mix muting.)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 12 — GENIUS LYRICS (added June 2026)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The SoundCloud importer searches Genius for the song's lyrics and
+feeds them to AssemblyAI as alignment context for more accurate
+word-level timestamps.
+
+1. Go to https://genius.com/api-clients and sign in
+2. Click "New API Client", fill in any app name/URL, and save
+3. Click "Generate Access Token" → copy the token
+4. Add it in Vercel → Settings → Environment Variables:
+       GENIUS_API_KEY=...
+   - Redeploy after adding the variable
+   (Without this key the app still works — it just skips the
+    Genius lyrics lookup and relies on AssemblyAI alone.)

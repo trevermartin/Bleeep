@@ -111,6 +111,7 @@ export async function POST(request: NextRequest) {
     originalFilename: string
     muteType: string
     manualLyrics?: string
+    geniusLyrics?: string
   }
 
   try {
@@ -212,6 +213,25 @@ export async function POST(request: NextRequest) {
       const assemblyApiKey = process.env.ASSEMBLYAI_API_KEY
       if (!assemblyApiKey) throw new Error('ASSEMBLYAI_API_KEY is not set')
 
+      // Genius lyrics (when available) are fed in as key-term context to bias
+      // recognition toward the real words and improve word-level alignment.
+      // AssemblyAI has no literal "reference transcript" field, so the lyric
+      // tokens ride alongside the profanity word boosts in keyterms_prompt.
+      const keyterms = [...WORD_BOOST]
+      if (body.geniusLyrics && body.geniusLyrics.trim()) {
+        const lyricTerms = Array.from(
+          new Set(
+            body.geniusLyrics
+              .toLowerCase()
+              .replace(/[^a-z0-9\s']/g, ' ')
+              .split(/\s+/)
+              .filter((t) => t.length > 1)
+          )
+        )
+        keyterms.push(...lyricTerms)
+        console.log(`[process] Genius lyrics → ${lyricTerms.length} key terms added for alignment`)
+      }
+
       console.log('[process] Submitting to AssemblyAI...')
       const submitRes = await fetch('https://api.assemblyai.com/v2/transcript', {
         method: 'POST',
@@ -222,8 +242,9 @@ export async function POST(request: NextRequest) {
         body: JSON.stringify({
           audio_url: originalUrl,
           speech_models: ['universal-3-pro'],
+          // profanity_filter OFF — never let AssemblyAI pre-censor words
           filter_profanity: false,
-          keyterms_prompt: WORD_BOOST,
+          keyterms_prompt: keyterms,
         }),
       })
 
