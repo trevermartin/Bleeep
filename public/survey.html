@@ -1,0 +1,240 @@
+
+<h2 class="sr-only">Bleeep market research survey — two questions about music censorship interest and pricing</h2>
+
+<style>
+  #bleeep-survey * { box-sizing: border-box; }
+  #bleeep-survey { max-width: 420px; margin: 0 auto; padding: 0.5rem 1rem 2rem; font-family: var(--font-sans); }
+  .opt { background: var(--color-background-primary); border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-md); padding: 12px; cursor: pointer; transition: border-color 0.15s, background 0.15s, transform 0.1s; user-select: none; }
+  .opt:active { transform: scale(0.97); }
+  .opt.sel { border: 1.5px solid #7F77DD; background: var(--color-background-secondary); }
+  .opt-label { font-size: 14px; font-weight: 500; color: var(--color-text-primary); margin: 0; }
+  .opt-sub { font-size: 12px; color: var(--color-text-secondary); margin: 4px 0 0; }
+  .opt-check { width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--color-border-secondary); flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+  .opt.sel .opt-check { background: #7F77DD; border-color: #7F77DD; }
+  .sec-label { font-size: 15px; font-weight: 500; color: var(--color-text-primary); margin: 0 0 4px; }
+  .sec-sub { font-size: 12px; color: var(--color-text-secondary); margin: 0 0 10px; }
+  #submit-btn { width: 100%; padding: 13px; background: #534AB7; color: white; border: none; border-radius: var(--border-radius-md); font-size: 15px; font-weight: 500; cursor: pointer; transition: opacity 0.15s, transform 0.1s; margin-top: 1.5rem; }
+  #submit-btn:disabled { opacity: 0.35; cursor: default; }
+  #submit-btn:not(:disabled):active { transform: scale(0.98); }
+  .qr-toggle { background: none; border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-md); padding: 8px 14px; font-size: 13px; color: var(--color-text-secondary); cursor: pointer; display: flex; align-items: center; gap: 6px; width: 100%; margin-top: 1rem; }
+  .bar-group { display: flex; align-items: flex-end; gap: 3px; height: 28px; }
+  .bar { width: 4px; border-radius: 2px; background: #7F77DD; }
+  #q2-section { transition: opacity 0.2s; }
+</style>
+
+<div id="bleeep-survey">
+  <div id="form-view">
+    <div id="logo-tap" style="text-align:center; padding: 1.25rem 0 0.75rem; cursor:default;">
+      <div style="display:inline-flex; align-items:center; gap:10px; margin-bottom:4px;">
+        <div style="width:38px;height:38px;background:#534AB7;border-radius:10px;display:flex;align-items:center;justify-content:center;">
+          <div class="bar-group" style="height:22px;">
+            <div class="bar" style="height:8px;"></div>
+            <div class="bar" style="height:16px;"></div>
+            <div class="bar" style="height:22px;"></div>
+            <div class="bar" style="height:13px;background:white;opacity:0.9;"></div>
+            <div class="bar" style="height:7px;background:white;opacity:0.7;"></div>
+          </div>
+        </div>
+        <span style="font-size:26px;font-weight:500;color:var(--color-text-primary);letter-spacing:-0.02em;">Bleeep</span>
+      </div>
+      <p style="font-size:12px;color:#7F77DD;margin:0;letter-spacing:0.04em;">VidAngel for music</p>
+    </div>
+
+    <div style="background:var(--color-background-secondary);border-radius:var(--border-radius-lg);padding:1rem 1.125rem;margin:0.75rem 0 1.25rem;border:0.5px solid var(--color-border-tertiary);">
+      <p style="font-size:13.5px;color:var(--color-text-secondary);margin:0;line-height:1.65;">Upload any song and Bleeep automatically removes every curse word — giving you a clean version that plays natively on Spotify, Apple Music, or anywhere you stream.</p>
+    </div>
+
+    <div style="margin-bottom:1.25rem;">
+      <p class="sec-label">Would you ever use this service?</p>
+      <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;" id="q1-grid"></div>
+    </div>
+
+    <div id="q2-section" style="opacity:0.35;pointer-events:none;">
+      <p class="sec-label">If so, what would it be worth to you?</p>
+      <p class="sec-sub">What feels like a fair price for clean music on demand?</p>
+      <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;" id="q2-grid"></div>
+      <div id="other-wrap" style="display:none;margin-top:8px;">
+        <input id="other-input" type="text" placeholder="What would work better for you?" style="width:100%;font-size:14px;"/>
+      </div>
+    </div>
+
+    <button id="submit-btn" disabled onclick="handleSubmit()">Submit</button>
+    <p style="font-size:11px;color:var(--color-text-tertiary);text-align:center;margin:8px 0 0;">Responses are collected anonymously to gauge interest.</p>
+
+    <button class="qr-toggle" onclick="toggleQr()">
+      <i class="ti ti-qrcode" aria-hidden="true"></i>
+      <span>Share this survey</span>
+      <i class="ti ti-chevron-down" id="qr-chev" aria-hidden="true" style="margin-left:auto;"></i>
+    </button>
+    <div id="qr-panel" style="display:none;background:var(--color-background-secondary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);padding:1rem;text-align:center;">
+      <p style="font-size:12px;color:var(--color-text-secondary);margin:0 0 10px;">Paste the artifact's share URL to generate a QR code.</p>
+      <input id="url-input" type="url" placeholder="https://claude.ai/artifacts/..." style="width:100%;font-size:13px;margin-bottom:10px;" oninput="updateQr(this.value)"/>
+      <div id="qr-wrap" style="min-height:120px;display:flex;align-items:center;justify-content:center;">
+        <p style="font-size:12px;color:var(--color-text-tertiary);margin:0;">QR code will appear here</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="thanks-view" style="display:none;text-align:center;padding:3rem 1rem;">
+    <div style="width:52px;height:52px;background:#EEEDFE;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 1rem;">
+      <i class="ti ti-check" style="font-size:26px;color:#534AB7;" aria-hidden="true"></i>
+    </div>
+    <p style="font-size:18px;font-weight:500;color:var(--color-text-primary);margin:0 0 8px;">Thanks!</p>
+    <p style="font-size:14px;color:var(--color-text-secondary);margin:0;">Your response has been recorded.</p>
+  </div>
+
+  <div id="admin-view" style="display:none;">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:1rem;">
+      <button onclick="showView('form')" style="background:none;border:none;cursor:pointer;color:var(--color-text-secondary);font-size:13px;padding:0;display:flex;align-items:center;gap:4px;"><i class="ti ti-arrow-left" aria-hidden="true"></i> Back</button>
+      <p style="font-size:15px;font-weight:500;margin:0;color:var(--color-text-primary);">Results</p>
+    </div>
+    <div id="admin-content"></div>
+  </div>
+</div>
+
+<script>
+const q1opts = [
+  {id:"never",label:"Never",icon:"ti-ban"},
+  {id:"maybe",label:"Maybe someday",icon:"ti-clock"},
+  {id:"probably",label:"Probably",icon:"ti-thumb-up"},
+  {id:"absolutely",label:"Absolutely",icon:"ti-flame"}
+];
+const q2opts = [
+  {id:"monthly",label:"$12 / month",sub:"Unlimited access"},
+  {id:"quarterly",label:"$21 / 3 months",sub:"Unlimited access"},
+  {id:"per_song",label:"~$1 per song",sub:"Pay as you go"},
+  {id:"less",label:"Less than that",sub:"Tell us what works"}
+];
+
+let selUsage = null, selPricing = null, adminTaps = 0;
+
+function buildGrid(containerId, opts, key) {
+  const g = document.getElementById(containerId);
+  const cur = key==='u' ? selUsage : selPricing;
+  g.innerHTML = opts.map(o => `
+    <div class="opt${cur===o.id?' sel':''}" onclick="selectOpt('${key}','${o.id}')">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px;">
+        <div>
+          ${o.icon?`<i class="ti ${o.icon}" style="font-size:18px;color:${cur===o.id?'#7F77DD':'var(--color-text-secondary)'};margin-bottom:6px;" aria-hidden="true"></i>`:''}
+          <p class="opt-label">${o.label}</p>
+          ${o.sub?`<p class="opt-sub">${o.sub}</p>`:''}
+        </div>
+        <div class="opt-check">${cur===o.id?'<i class="ti ti-check" style="font-size:12px;color:white;" aria-hidden="true"></i>':''}</div>
+      </div>
+    </div>`).join('');
+}
+
+function selectOpt(key, val) {
+  if (key==='u') {
+    selUsage = val;
+    const q2 = document.getElementById('q2-section');
+    if (val === 'never') {
+      q2.style.opacity = '0.35';
+      q2.style.pointerEvents = 'none';
+      selPricing = null;
+      buildGrid('q2-grid', q2opts, 'p');
+    } else {
+      q2.style.opacity = '1';
+      q2.style.pointerEvents = 'auto';
+    }
+  } else {
+    selPricing = val;
+  }
+  buildGrid('q1-grid', q1opts, 'u');
+  buildGrid('q2-grid', q2opts, 'p');
+  const showOther = selPricing === 'less';
+  document.getElementById('other-wrap').style.display = showOther ? 'block' : 'none';
+  const canSubmit = selUsage === 'never' ? true : (selUsage && selPricing);
+  document.getElementById('submit-btn').disabled = !canSubmit;
+}
+
+function showView(v) {
+  document.getElementById('form-view').style.display = v==='form'?'block':'none';
+  document.getElementById('thanks-view').style.display = v==='thanks'?'block':'none';
+  document.getElementById('admin-view').style.display = v==='admin'?'block':'none';
+}
+
+async function handleSubmit() {
+  const other = selPricing==='less' ? (document.getElementById('other-input').value||'') : '';
+  const r = {usage:selUsage, pricing:selPricing||'n/a', other, ts:Date.now()};
+  try { await window.storage.set('resp:'+Date.now(), JSON.stringify(r), true); } catch(e){}
+  showView('thanks');
+}
+
+function toggleQr() {
+  const p = document.getElementById('qr-panel');
+  const c = document.getElementById('qr-chev');
+  const open = p.style.display==='none';
+  p.style.display = open?'block':'none';
+  c.style.transform = open?'rotate(180deg)':'';
+}
+
+function updateQr(url) {
+  const w = document.getElementById('qr-wrap');
+  if (!url || !url.startsWith('http')) {
+    w.innerHTML='<p style="font-size:12px;color:var(--color-text-tertiary);margin:0;">QR code will appear here</p>';
+    return;
+  }
+  w.innerHTML=`<img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(url)}&margin=10" width="180" height="180" alt="QR code for Bleeep survey" style="border-radius:8px;"/>`;
+}
+
+document.getElementById('logo-tap').addEventListener('click', async () => {
+  adminTaps++;
+  if (adminTaps >= 5) {
+    adminTaps = 0;
+    await loadAdmin();
+    showView('admin');
+  }
+});
+
+async function loadAdmin() {
+  const el = document.getElementById('admin-content');
+  el.innerHTML='<p style="font-size:13px;color:var(--color-text-secondary);">Loading...</p>';
+  try {
+    const {keys} = await window.storage.list('resp:', true);
+    const uC={never:0,maybe:0,probably:0,absolutely:0};
+    const pC={monthly:0,quarterly:0,per_song:0,less:0};
+    const others=[];
+    for (const k of keys) {
+      try {
+        const {value} = await window.storage.get(k,true);
+        const r=JSON.parse(value);
+        if (uC[r.usage]!==undefined) uC[r.usage]++;
+        if (pC[r.pricing]!==undefined) pC[r.pricing]++;
+        if (r.other) others.push(r.other);
+      } catch{}
+    }
+    const total = keys.length;
+    function pct(n){return total?Math.round(n/total*100):0;}
+    function bar(label,count){
+      const w=total?Math.round(count/total*100):0;
+      return `<div style="margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+          <span style="font-size:13px;color:var(--color-text-primary);">${label}</span>
+          <span style="font-size:13px;color:var(--color-text-secondary);">${count} (${pct(count)}%)</span>
+        </div>
+        <div style="height:6px;background:var(--color-background-secondary);border-radius:3px;overflow:hidden;">
+          <div style="height:100%;width:${w}%;background:#7F77DD;border-radius:3px;"></div>
+        </div>
+      </div>`;
+    }
+    el.innerHTML=`
+      <div style="background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:10px 14px;margin-bottom:1rem;display:flex;align-items:center;gap:8px;">
+        <i class="ti ti-users" style="font-size:18px;color:#7F77DD;" aria-hidden="true"></i>
+        <span style="font-size:22px;font-weight:500;color:var(--color-text-primary);">${total}</span>
+        <span style="font-size:13px;color:var(--color-text-secondary);">total responses</span>
+      </div>
+      <p style="font-size:11px;font-weight:500;color:var(--color-text-secondary);margin:0 0 10px;text-transform:uppercase;letter-spacing:0.06em;">Interest</p>
+      ${bar('Never',uC.never)}${bar('Maybe someday',uC.maybe)}${bar('Probably',uC.probably)}${bar('Absolutely',uC.absolutely)}
+      <p style="font-size:11px;font-weight:500;color:var(--color-text-secondary);margin:1.25rem 0 10px;text-transform:uppercase;letter-spacing:0.06em;">What it's worth</p>
+      ${bar('$12 / month',pC.monthly)}${bar('$21 / 3 months',pC.quarterly)}${bar('~$1 / song',pC.per_song)}${bar('Less than that',pC.less)}
+      ${others.length?`<p style="font-size:11px;font-weight:500;color:var(--color-text-secondary);margin:1.25rem 0 8px;text-transform:uppercase;letter-spacing:0.06em;">What would work better</p>${others.map(o=>`<p style="font-size:13px;color:var(--color-text-primary);background:var(--color-background-secondary);border-radius:6px;padding:7px 10px;margin:4px 0;">${o}</p>`).join('')}`:''}
+    `;
+  } catch(e){
+    el.innerHTML='<p style="font-size:13px;color:var(--color-text-secondary);">No responses yet.</p>';
+  }
+}
+
+buildGrid('q1-grid', q1opts, 'u');
+buildGrid('q2-grid', q2opts, 'p');
+</script>
