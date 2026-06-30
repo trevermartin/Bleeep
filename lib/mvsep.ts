@@ -53,9 +53,15 @@ export async function separateStemsMVSEP(
   audioUrl: string,
   timeoutMs = 45000
 ): Promise<MvsepStems | null> {
+  const t0 = Date.now()
+  const elapsed = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`
+
   const apiKey = process.env.MVSEP_API_KEY
+  console.log(
+    `[mvsep] separateStemsMVSEP() invoked. apiKeyPresent=${!!apiKey} timeoutMs=${timeoutMs} audioUrl=${audioUrl}`
+  )
   if (!apiKey) {
-    console.warn('[mvsep] MVSEP_API_KEY not set — skipping vocal isolation')
+    console.warn('[mvsep] MVSEP_API_KEY not set — skipping vocal isolation, returning null')
     return null
   }
 
@@ -67,42 +73,85 @@ export async function separateStemsMVSEP(
     form.append('add_opt', JSON.stringify({ return_format: 'wav' }))
     form.append('link', audioUrl)
 
-    console.log('[mvsep] Submitting separation job...')
+    console.log('[mvsep] POST /separation/create (sep_type=mdx23c, return_format=wav)...')
     const createRes = await fetch(MVSEP_CREATE_URL, { method: 'POST', body: form })
+    const createText = await createRes.text()
+    console.log(
+      `[mvsep] create response: HTTP ${createRes.status} ${createRes.statusText} | body=${createText.slice(0, 2000)}`
+    )
     if (!createRes.ok) {
-      console.warn(`[mvsep] Create request failed: HTTP ${createRes.status}`)
+      console.warn(`[mvsep] Create request failed (HTTP ${createRes.status}) — returning null`)
       return null
     }
 
-    const createData = (await createRes.json()) as any
+    let createData: any
+    try {
+      createData = JSON.parse(createText)
+    } catch {
+      console.warn('[mvsep] Create response was not valid JSON — returning null')
+      return null
+    }
     // Hash may be top-level or nested under .data
     const hash: string | undefined = createData?.hash ?? createData?.data?.hash
     if (!hash) {
-      console.warn('[mvsep] No hash in response:', JSON.stringify(createData).slice(0, 300))
+      console.warn('[mvsep] No hash in create response — returning null. Full response logged above.')
       return null
     }
-    console.log(`[mvsep] Job queued. hash=${hash}, timeout=${timeoutMs}ms`)
+    console.log(`[mvsep] Job queued. hash=${hash} timeout=${timeoutMs}ms`)
 
     // Poll until separation completes or timeout
     const deadline = Date.now() + timeoutMs
+    let pollCount = 0
     while (Date.now() < deadline) {
       await new Promise<void>((r) => setTimeout(r, POLL_INTERVAL_MS))
+      pollCount++
 
       const pollRes = await fetch(
         `${MVSEP_GET_URL}?hash=${encodeURIComponent(hash)}&api_token=${encodeURIComponent(apiKey)}`
       )
-      if (!pollRes.ok) continue
+      if (!pollRes.ok) {
+        console.warn(`[mvsep] poll #${pollCount} (${elapsed()}): HTTP ${pollRes.status} — retrying`)
+        continue
+      }
 
-      const pollData = (await pollRes.json()) as any
-      // Output files may be in .data or .files depending on API version
-      const files: any[] = pollData?.data ?? pollData?.files ?? []
+      const pollText = await pollRes.text()
+      let pollData: any
+      try {
+        pollData = JSON.parse(pollText)
+      } catch {
+        console.warn(`[mvsep] poll #${pollCount} (${elapsed()}): non-JSON body=${pollText.slice(0, 500)}`)
+        continue
+      }
+
+      // Output files may be in .data or .files depending on API version. .data
+      // can also be an OBJECT wrapping a files array rather than an array.
+      const rawData = pollData?.data
+      const files: any[] = Array.isArray(rawData)
+        ? rawData
+        : Array.isArray(rawData?.files)
+          ? rawData.files
+          : Array.isArray(pollData?.files)
+            ? pollData.files
+            : []
+
+      console.log(
+        `[mvsep] poll #${pollCount} (${elapsed()}): status=${pollData?.status ?? '?'} success=${pollData?.success ?? '?'} ` +
+          `dataType=${Array.isArray(rawData) ? 'array' : typeof rawData} fileCount=${files.length} | ` +
+          `raw=${pollText.slice(0, 1500)}`
+      )
 
       if (files.length > 0) {
+        console.log(
+          `[mvsep] poll #${pollCount} files: ${files
+            .map((f, i) => `[${i}] name="${lc(f)}" url=${urlOf(f) ?? 'none'}`)
+            .join(' | ')}`
+        )
         const vocalsFile = files.find((f) => isVocals(lc(f)))
         let instrFile = files.find((f) => isInstrumental(lc(f)))
         // 2-stem model with unrecognized naming: the non-vocals file is the instrumental
         if (vocalsFile && !instrFile && files.length === 2) {
           instrFile = files.find((f) => f !== vocalsFile)
+          console.log('[mvsep] instrumental matched by elimination (2-file fallback)')
         }
 
         const vocals = vocalsFile ? urlOf(vocalsFile) ?? null : null
@@ -110,20 +159,22 @@ export async function separateStemsMVSEP(
 
         if (vocals || instrumental) {
           console.log(
-            `[mvsep] Stems ready — vocals=${vocals ? 'yes' : 'no'} instrumental=${instrumental ? 'yes' : 'no'}`
+            `[mvsep] DONE in ${elapsed()} after ${pollCount} poll(s) — vocals=${vocals ?? 'null'} instrumental=${instrumental ?? 'null'}`
           )
           return { vocals, instrumental }
         }
+        console.warn(
+          '[mvsep] files present but neither matched isVocals/isInstrumental — see file names above'
+        )
       }
-
-      const remaining = Math.ceil((deadline - Date.now()) / 1000)
-      console.log(`[mvsep] Still processing... ${remaining}s remaining`)
     }
 
-    console.warn('[mvsep] Timed out — will fall back to full-mix processing')
+    console.warn(
+      `[mvsep] TIMED OUT after ${elapsed()} / ${pollCount} poll(s) — separation not ready, returning null (full-mix fallback)`
+    )
     return null
   } catch (err) {
-    console.warn('[mvsep] Error:', err instanceof Error ? err.message : String(err))
+    console.warn(`[mvsep] ERROR after ${elapsed()}:`, err instanceof Error ? err.stack ?? err.message : String(err))
     return null
   }
 }

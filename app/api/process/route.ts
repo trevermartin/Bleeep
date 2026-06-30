@@ -243,15 +243,17 @@ export async function POST(request: NextRequest) {
       // Transcribe the isolated vocal stem when available — WAV stems are
       // sample-aligned with the full mix so transcript timestamps stay in sync
       // with the review waveform. Falls back to the full mix on any failure.
+      console.log('[process] >>> Requesting MVSEP stems for TRANSCRIPTION source...')
       const s = await getStems()
+      console.log(
+        `[process] getStems() → ${s ? `vocals=${s.vocals ?? 'null'} instrumental=${s.instrumental ?? 'null'}` : 'null (separation failed/unavailable)'}`
+      )
       const transcribeUrl = s?.vocals ?? originalUrl
-      if (s?.vocals) {
-        console.log('[process] MVSEP vocal stem ready — using isolated vocals for transcription')
-      } else {
-        console.log('[process] MVSEP unavailable/timeout — transcribing full mix')
-      }
+      console.log(
+        `[process] TRANSCRIPTION SOURCE = ${s?.vocals ? 'MVSEP VOCAL STEM' : 'ORIGINAL FULL MIX'} → ${transcribeUrl}`
+      )
 
-      console.log('[process] Submitting to AssemblyAI...')
+      console.log(`[process] Submitting to AssemblyAI with audio_url=${transcribeUrl}`)
       const submitRes = await fetch('https://api.assemblyai.com/v2/transcript', {
         method: 'POST',
         headers: {
@@ -315,13 +317,21 @@ export async function POST(request: NextRequest) {
       //     instrumental, so the beat plays through even during a censored
       //     word. If stems are missing, fall back to muting the full mix.
       const s = await getStems()
+      console.log(
+        `[process] RENDER decision: getStems() → vocals=${s?.vocals ?? 'null'} instrumental=${s?.instrumental ?? 'null'}`
+      )
       if (s?.vocals && s?.instrumental) {
+        console.log('[process] RENDER PATH = VOCAL-ONLY (mute/warp vocals, instrumental 100% intact)')
         const vocalsPath = path.join(tmpDir, `bleeep_vocals_${songId}.wav`)
         const instrumentalPath = path.join(tmpDir, `bleeep_instrumental_${songId}.wav`)
         tmpFiles.push(vocalsPath, instrumentalPath)
-        console.log('[process] Downloading MVSEP stems for vocal-only render...')
+        console.log(`[process] Downloading vocal stem: ${s.vocals}`)
         await downloadToFile(s.vocals, vocalsPath)
+        console.log(`[process] Downloading instrumental stem: ${s.instrumental}`)
         await downloadToFile(s.instrumental, instrumentalPath)
+        const vSize = fs.existsSync(vocalsPath) ? fs.statSync(vocalsPath).size : -1
+        const iSize = fs.existsSync(instrumentalPath) ? fs.statSync(instrumentalPath).size : -1
+        console.log(`[process] Stems downloaded: vocals=${vSize}B instrumental=${iSize}B`)
 
         // 8b. Render: mute/warp the vocal stem, keep instrumental untouched
         await renderCleanAudio({
@@ -332,10 +342,14 @@ export async function POST(request: NextRequest) {
         })
       } else {
         // Fallback: full-mix muting (background music affected during words)
+        const reason = !s
+          ? 'separation failed/unavailable'
+          : `missing stem (vocals=${s.vocals ? 'ok' : 'null'}, instrumental=${s.instrumental ? 'ok' : 'null'})`
+        console.log(`[process] RENDER PATH = FULL-MIX FALLBACK — reason: ${reason}`)
         const ext = path.extname(originalFilename) || '.mp3'
         const inputPath = path.join(tmpDir, `bleeep_input_${songId}${ext}`)
         tmpFiles.push(inputPath)
-        console.log(`[process] No stems — full-mix render. Downloading: ${originalUrl}`)
+        console.log(`[process] Downloading full mix: ${originalUrl}`)
         await downloadToFile(originalUrl, inputPath)
 
         // 8b. Render: mute or warp the detected words on the full mix
