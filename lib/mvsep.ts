@@ -66,6 +66,7 @@ export async function separateStemsMVSEP(
   }
 
   try {
+    console.log('[mvsep] Using file-upload method (commit 4103412+)')
     // MVSEP's create endpoint requires the actual audio bytes as a multipart
     // file upload — passing a `link` URL returns HTTP 400 "File not uploaded".
     // So download the source from Supabase first, then upload the buffer.
@@ -111,7 +112,10 @@ export async function separateStemsMVSEP(
       `[mvsep] create response: HTTP ${createRes.status} ${createRes.statusText} | body=${createText.slice(0, 2000)}`
     )
     if (!createRes.ok) {
-      console.warn(`[mvsep] Create request failed (HTTP ${createRes.status}) — returning null`)
+      console.warn(
+        `[mvsep] Create request FAILED (HTTP ${createRes.status} ${createRes.statusText}). FULL response body below:`
+      )
+      console.warn(`[mvsep] >>> ${createText} <<<`)
       return null
     }
 
