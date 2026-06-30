@@ -66,14 +66,45 @@ export async function separateStemsMVSEP(
   }
 
   try {
-    // Submit job via URL link (avoids downloading the file server-side)
+    // MVSEP's create endpoint requires the actual audio bytes as a multipart
+    // file upload — passing a `link` URL returns HTTP 400 "File not uploaded".
+    // So download the source from Supabase first, then upload the buffer.
+    console.log('[mvsep] Downloading source audio for upload...')
+    const srcRes = await fetch(audioUrl)
+    if (!srcRes.ok) {
+      console.warn(`[mvsep] Failed to download source audio: HTTP ${srcRes.status} — returning null`)
+      return null
+    }
+    const srcBuf = Buffer.from(await srcRes.arrayBuffer())
+
+    // Derive a filename + mime type for the upload part.
+    let filename = 'audio.mp3'
+    try {
+      const base = new URL(audioUrl).pathname.split('/').pop()
+      if (base) filename = decodeURIComponent(base)
+    } catch {
+      // keep default
+    }
+    const ext = filename.toLowerCase().slice(filename.lastIndexOf('.'))
+    const headerType = srcRes.headers.get('content-type') ?? ''
+    const mime = headerType.startsWith('audio/')
+      ? headerType
+      : ext === '.wav'
+        ? 'audio/wav'
+        : ext === '.flac'
+          ? 'audio/flac'
+          : ext === '.m4a'
+            ? 'audio/mp4'
+            : 'audio/mpeg'
+    console.log(`[mvsep] Source downloaded: ${srcBuf.length}B filename="${filename}" mime=${mime}`)
+
     const form = new FormData()
     form.append('api_token', apiKey)
     form.append('sep_type', 'mdx23c')
     form.append('add_opt', JSON.stringify({ return_format: 'wav' }))
-    form.append('link', audioUrl)
+    form.append('audiofile', new Blob([srcBuf], { type: mime }), filename)
 
-    console.log('[mvsep] POST /separation/create (sep_type=mdx23c, return_format=wav)...')
+    console.log('[mvsep] POST /separation/create (multipart file upload, sep_type=mdx23c, return_format=wav)...')
     const createRes = await fetch(MVSEP_CREATE_URL, { method: 'POST', body: form })
     const createText = await createRes.text()
     console.log(
