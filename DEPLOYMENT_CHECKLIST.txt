@@ -166,6 +166,33 @@ STEP 11 — COMMUNITY TIMESTAMPS + VOCAL ISOLATION (added June 2026)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 12 — GENIUS LYRICS (added June 2026)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 13 — MVSEP VOCAL ISOLATION (added June 2026)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+When /api/process falls back to AssemblyAI transcription it first
+sends the audio to MVSEP to isolate the vocal stem, then transcribes
+only the vocals. This improves word-level timestamp accuracy by
+removing the instrumental layer before transcription.
+
+1. Go to https://mvsep.com and create an account
+2. Go to your Profile → API section and generate an API key
+3. Add it in Vercel → Settings → Environment Variables:
+       MVSEP_API_KEY=...
+   - Redeploy after adding the variable
+
+Notes:
+- If MVSEP_API_KEY is not set, or if separation takes longer than
+  45 seconds, the app automatically falls back to transcribing the
+  full mix — no outage, just slightly lower accuracy.
+- The default separation model is MDX23C (2-stem: vocals / no_vocals).
+  You can change sep_type in lib/mvsep.ts to 'bs_roformer_vocals' or
+  'htdemucs' if your MVSEP plan supports those models.
+- Only the vocal stem goes to AssemblyAI. The original full mix is
+  still what gets muted/warped in the final output.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 12 — GENIUS LYRICS (added June 2026)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 The SoundCloud importer searches Genius for the song's lyrics and
 feeds them to AssemblyAI as alignment context for more accurate
 word-level timestamps.

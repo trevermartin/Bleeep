@@ -5,6 +5,7 @@ import { isProfane, WORD_BOOST } from '@/lib/profanity-list'
 import { parseFilename, fetchLrcLyrics, parseLrc, detectProfanityInLyrics } from '@/lib/lrclib'
 import { trackFingerprint } from '@/lib/fingerprint'
 import { renderCleanAudio, downloadToFile } from '@/lib/audio'
+import { separateVocalsMVSEP } from '@/lib/mvsep'
 import path from 'path'
 import os from 'os'
 import fs from 'fs'
@@ -232,6 +233,16 @@ export async function POST(request: NextRequest) {
         console.log(`[process] Genius lyrics → ${lyricTerms.length} key terms added for alignment`)
       }
 
+      // Attempt MVSEP vocal isolation (45s timeout). Falls back to full mix on any failure.
+      let transcribeUrl = originalUrl
+      const vocalsUrl = await separateVocalsMVSEP(originalUrl, 45000)
+      if (vocalsUrl) {
+        transcribeUrl = vocalsUrl
+        console.log('[process] MVSEP vocal stem ready — using isolated vocals for transcription')
+      } else {
+        console.log('[process] MVSEP unavailable/timeout — transcribing full mix')
+      }
+
       console.log('[process] Submitting to AssemblyAI...')
       const submitRes = await fetch('https://api.assemblyai.com/v2/transcript', {
         method: 'POST',
@@ -240,7 +251,7 @@ export async function POST(request: NextRequest) {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
-          audio_url: originalUrl,
+          audio_url: transcribeUrl,
           speech_models: ['universal-3-pro'],
           // profanity_filter OFF — never let AssemblyAI pre-censor words
           filter_profanity: false,
