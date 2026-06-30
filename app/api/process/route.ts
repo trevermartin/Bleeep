@@ -144,6 +144,9 @@ export async function POST(request: NextRequest) {
   try {
     // ── Step 6: Detect profanity (manual lyrics → community → LRCLIB → AssemblyAI) ──
     let detectedWords: DetectedWord[] = []
+    // Full word-level transcript (only populated by the AssemblyAI path) so the
+    // review UI can offer a clickable word-by-word selection panel.
+    let transcriptWords: Array<{ word: string; start: number; end: number }> = []
     let detectionMethod: 'lyrics' | 'ai' | 'community' = 'ai'
 
     // 6a. Manual lyrics pasted by the user — highest priority
@@ -273,6 +276,13 @@ export async function POST(request: NextRequest) {
       const rawWords: Array<{ text: string; start: number; end: number }> =
         transcript.words || []
 
+      // Full transcript (every word) for the clickable review panel
+      transcriptWords = rawWords.map((w) => ({
+        word: w.text,
+        start: w.start / 1000, // ms → seconds
+        end: w.end / 1000,
+      }))
+
       detectedWords = rawWords
         .filter((w) => isProfane(w.text))
         .map((w) => ({
@@ -363,6 +373,7 @@ export async function POST(request: NextRequest) {
       cleanUrl,
       originalUrl,
       wordsDetected: detectedWords,
+      transcript: transcriptWords,
       wordCount: detectedWords.length,
       detectionMethod,
     })

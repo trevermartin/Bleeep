@@ -9,7 +9,7 @@ import dynamic from 'next/dynamic'
 import Navbar from '@/components/Navbar'
 import { createClient } from '@/lib/supabase/client'
 import type { Profile, Song, DetectedWord, ProcessingStatus, MuteType, DetectionMethod } from '@/types'
-import type { ReviewWord } from '@/components/WaveformReview'
+import type { ReviewWord, TranscriptWord } from '@/components/WaveformReview'
 
 const WaveformReview = dynamic(() => import('@/components/WaveformReview'), { ssr: false })
 
@@ -52,6 +52,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
     originalUrl: string
     originalFilename: string
     words: ReviewWord[]
+    transcript: TranscriptWord[]
     detectionMethod: DetectionMethod
   } | null>(null)
   const [isReprocessing, setIsReprocessing] = useState(false)
@@ -160,6 +161,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
           originalUrl: data.originalUrl,
           originalFilename: file.name,
           words,
+          transcript: (data.transcript ?? []) as TranscriptWord[],
           detectionMethod: data.detectionMethod ?? 'ai',
         })
 
@@ -291,6 +293,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
         originalUrl: scData.originalUrl,
         originalFilename: scData.originalFilename,
         words,
+        transcript: (data.transcript ?? []) as TranscriptWord[],
         detectionMethod: data.detectionMethod ?? 'ai',
       })
       setSoundcloudUrl('')
@@ -827,6 +830,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
             audioUrl={pendingReview.originalUrl}
             originalFilename={pendingReview.originalFilename}
             words={pendingReview.words}
+            transcript={pendingReview.transcript}
             detectionMethod={pendingReview.detectionMethod}
             muteType={muteType}
             isReprocessing={isReprocessing}

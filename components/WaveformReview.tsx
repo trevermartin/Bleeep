@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/exhaustive-deps, react/no-unescaped-entities */
 'use client'
 
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, Fragment } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import toast from 'react-hot-toast'
 
@@ -15,10 +15,18 @@ export type ReviewWord = {
   mute_type: 'mute' | 'warp'
 }
 
+// Full word-level transcript entry (every word AssemblyAI returned, not just profanity)
+export type TranscriptWord = {
+  word: string
+  start: number
+  end: number
+}
+
 interface Props {
   audioUrl: string
   originalFilename: string
   words: ReviewWord[]
+  transcript: TranscriptWord[]
   detectionMethod: 'lyrics' | 'ai' | 'community'
   muteType: 'mute' | 'warp'
   isReprocessing: boolean
@@ -59,6 +67,7 @@ export default function WaveformReview({
   audioUrl,
   originalFilename,
   words,
+  transcript,
   detectionMethod,
   muteType,
   isReprocessing,
@@ -348,6 +357,7 @@ export default function WaveformReview({
       gainTimeoutsRef.current.forEach(clearTimeout)
       gainTimeoutsRef.current = []
       scheduleMutesRef.current = null
+      if (flashTimeoutRef.current) clearTimeout(flashTimeoutRef.current)
       previewCleanupRef.current?.()
       if (wsRef.current) {
         wsRef.current.destroy()
@@ -506,6 +516,85 @@ export default function WaveformReview({
     setNewWordTime('')
     setNewWordText('')
   }
+
+  // ── Clickable transcript ──────────────────────────────────────────────────
+  // A transcript word counts as "flagged" when any current mute/warp region
+  // overlaps its [start, end] span. Regions and transcript words share the same
+  // AssemblyAI timebase, so overlap matching survives drags/resizes too.
+  const flashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const transcriptScrollRef = useRef<HTMLDivElement>(null)
+
+  const overlappingWord = (tw: TranscriptWord): ReviewWord | undefined =>
+    wordsRef.current.find((w) => w.start < tw.end && w.end > tw.start)
+
+  // Briefly brighten a region so the user can spot it on the waveform.
+  const flashRegion = (id: string) => {
+    const region = regionMapRef.current.get(id)
+    if (!region) return
+    if (flashTimeoutRef.current) clearTimeout(flashTimeoutRef.current)
+    const baseColor = regionColor(
+      wordsRef.current.find((w) => w.id === id)?.mute_type ?? muteTypeRef.current
+    )
+    programmaticRef.current = true
+    region.setOptions({ color: 'rgba(196,181,253,0.7)' })
+    programmaticRef.current = false
+    flashTimeoutRef.current = setTimeout(() => {
+      programmaticRef.current = true
+      region.setOptions({ color: baseColor })
+      programmaticRef.current = false
+    }, 650)
+  }
+
+  // Create a mute/warp region from a transcript word; returns the new word id.
+  const addRegionForWord = (tw: TranscriptWord): string => {
+    const id = uuidv4()
+    const newWord: ReviewWord = {
+      id,
+      word: (tw.word || 'word').replace(/[^a-zA-Z0-9']/g, '').toLowerCase() || 'word',
+      start: +tw.start.toFixed(2),
+      end: +tw.end.toFixed(2),
+      mute_type: muteTypeRef.current,
+    }
+    pushHistory(wordsRef.current)
+    if (regionsRef.current) {
+      const region = regionsRef.current.addRegion({
+        start: newWord.start,
+        end: newWord.end,
+        color: regionColor(newWord.mute_type),
+        drag: true,
+        resize: true,
+      })
+      regionMapRef.current.set(id, region)
+    }
+    const newWords = [...wordsRef.current, newWord].sort((a, b) => a.start - b.start)
+    wordsRef.current = newWords
+    onWordsChange(newWords)
+    return id
+  }
+
+  // Click a transcript word: toggle its region on/off, then seek + flash so the
+  // user can hit play and verify by ear.
+  const handleTranscriptWordClick = (tw: TranscriptWord) => {
+    const existing = overlappingWord(tw)
+    let flashId: string | null = null
+    if (existing) {
+      removeWord(existing.id)
+    } else {
+      flashId = addRegionForWord(tw)
+    }
+    if (wsRef.current && durationRef.current > 0) {
+      wsRef.current.seekTo(Math.min(0.999, Math.max(0, tw.start / durationRef.current)))
+      setCurrentTime(tw.start)
+    }
+    if (flashId) flashRegion(flashId)
+  }
+
+  // Auto-scroll the transcript so the currently-playing word stays in view.
+  useEffect(() => {
+    if (!isPlaying || !transcriptScrollRef.current) return
+    const el = transcriptScrollRef.current.querySelector('[data-tw-playing="true"]')
+    if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [currentTime, isPlaying])
 
   // ── Copy / Paste timing ───────────────────────────────────────────────────
 
@@ -716,6 +805,57 @@ export default function WaveformReview({
           )}
         </div>
       </div>
+
+      {/* ── Clickable transcript ──────────────────────────────────────── */}
+      {transcript.length > 0 && (
+        <div className="glass rounded-2xl p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-white/60 text-xs font-medium uppercase tracking-wider">
+              Transcript
+            </h3>
+            <div className="flex items-center gap-3 text-xs">
+              <span className="flex items-center gap-1.5 text-white/30">
+                <span className="w-2.5 h-2.5 rounded-sm" style={{ background: WARP_REGION_COLOR }} />
+                muted/warped
+              </span>
+              <span className="text-white/30">{transcript.length} words</span>
+            </div>
+          </div>
+
+          <p className="text-white/30 text-xs mb-3">
+            Click any word to toggle it on or off. Highlighted words are censored; click one to
+            jump there on the waveform and press play to verify.
+          </p>
+
+          <div
+            ref={transcriptScrollRef}
+            className="max-h-56 overflow-y-auto leading-relaxed pr-1 -mr-1"
+          >
+            <p className="text-sm">
+              {transcript.map((tw, i) => {
+                const flagged = words.some((w) => w.start < tw.end && w.end > tw.start)
+                const playing = currentTime >= tw.start && currentTime <= tw.end
+                return (
+                  <Fragment key={`${i}-${tw.start}`}>
+                    <span
+                      data-tw-playing={playing}
+                      onClick={() => handleTranscriptWordClick(tw)}
+                      title={`${fmt(tw.start)} — click to ${flagged ? 'unmute' : 'mute/warp'}`}
+                      className={`cursor-pointer rounded px-1 py-0.5 transition-colors select-none ${
+                        flagged
+                          ? 'bg-violet-500/25 text-violet-200 hover:bg-violet-500/40 font-medium'
+                          : 'text-white/45 hover:bg-white/10 hover:text-white/80'
+                      } ${playing ? 'ring-1 ring-violet-300/70' : ''}`}
+                    >
+                      {tw.word}
+                    </span>{' '}
+                  </Fragment>
+                )
+              })}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* ── Word list ─────────────────────────────────────────────────── */}
       <div className="glass rounded-2xl p-5">
