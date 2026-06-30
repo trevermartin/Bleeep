@@ -4,18 +4,55 @@ const MVSEP_CREATE_URL = 'https://mvsep.com/api/separation/create'
 const MVSEP_GET_URL = 'https://mvsep.com/api/separation/get'
 const POLL_INTERVAL_MS = 4000
 
+export interface MvsepStems {
+  vocals: string | null
+  instrumental: string | null
+}
+
+const lc = (f: any): string => (f?.name ?? f?.filename ?? '').toLowerCase()
+const urlOf = (f: any): string | undefined => f?.url ?? f?.download_url
+
+function isVocals(name: string): boolean {
+  return (
+    name.includes('vocal') &&
+    !name.includes('no_vocal') &&
+    !name.includes('novocal') &&
+    !name.includes('no vocal') &&
+    !name.includes('instrument')
+  )
+}
+
+function isInstrumental(name: string): boolean {
+  return (
+    name.includes('instrument') ||
+    name.includes('no_vocal') ||
+    name.includes('novocal') ||
+    name.includes('no vocal') ||
+    name.includes('accompan') ||
+    name.includes('music')
+  )
+}
+
 /**
- * Submits audio at `audioUrl` to MVSEP for vocal isolation.
- * Polls until the vocals stem is ready or `timeoutMs` elapses.
- * Returns the public URL of the vocals-only file, or null on timeout/error.
+ * Submits audio at `audioUrl` to MVSEP and isolates the vocal + instrumental
+ * stems. Polls until separation is ready or `timeoutMs` elapses.
+ *
+ * Returns { vocals, instrumental } URLs (either may be null if a stem wasn't
+ * found), or null on total failure/timeout so callers can fall back to the
+ * full mix.
+ *
+ * Output is requested as WAV (lossless): MP3 stems carry encoder/decoder delay
+ * (~50-100ms of leading padding) which would shift every transcript timestamp
+ * relative to the original full mix played in the review waveform. WAV is
+ * sample-aligned with the source, keeping transcript clicks and playback in
+ * perfect sync.
  *
  * sep_type 'mdx23c' = MDX23C model (2-stem: vocals + no_vocals).
- * Update to 'bs_roformer_vocals' or 'htdemucs' if your account supports them.
  */
-export async function separateVocalsMVSEP(
+export async function separateStemsMVSEP(
   audioUrl: string,
   timeoutMs = 45000
-): Promise<string | null> {
+): Promise<MvsepStems | null> {
   const apiKey = process.env.MVSEP_API_KEY
   if (!apiKey) {
     console.warn('[mvsep] MVSEP_API_KEY not set — skipping vocal isolation')
@@ -27,7 +64,7 @@ export async function separateVocalsMVSEP(
     const form = new FormData()
     form.append('api_token', apiKey)
     form.append('sep_type', 'mdx23c')
-    form.append('add_opt', JSON.stringify({ return_format: 'mp3' }))
+    form.append('add_opt', JSON.stringify({ return_format: 'wav' }))
     form.append('link', audioUrl)
 
     console.log('[mvsep] Submitting separation job...')
@@ -61,22 +98,21 @@ export async function separateVocalsMVSEP(
       const files: any[] = pollData?.data ?? pollData?.files ?? []
 
       if (files.length > 0) {
-        // Prefer the file whose name contains "vocal" but not "no_vocal"/"instrumental"
-        const vocalsFile =
-          files.find((f: any) => {
-            const name: string = (f.name ?? f.filename ?? '').toLowerCase()
-            return (
-              name.includes('vocal') &&
-              !name.includes('no_vocal') &&
-              !name.includes('novocal') &&
-              !name.includes('instrumental')
-            )
-          }) ?? files[0]
+        const vocalsFile = files.find((f) => isVocals(lc(f)))
+        let instrFile = files.find((f) => isInstrumental(lc(f)))
+        // 2-stem model with unrecognized naming: the non-vocals file is the instrumental
+        if (vocalsFile && !instrFile && files.length === 2) {
+          instrFile = files.find((f) => f !== vocalsFile)
+        }
 
-        const url: string | undefined = vocalsFile?.url ?? vocalsFile?.download_url
-        if (url) {
-          console.log(`[mvsep] Vocals stem ready: ${url}`)
-          return url
+        const vocals = vocalsFile ? urlOf(vocalsFile) ?? null : null
+        const instrumental = instrFile ? urlOf(instrFile) ?? null : null
+
+        if (vocals || instrumental) {
+          console.log(
+            `[mvsep] Stems ready — vocals=${vocals ? 'yes' : 'no'} instrumental=${instrumental ? 'yes' : 'no'}`
+          )
+          return { vocals, instrumental }
         }
       }
 
@@ -84,7 +120,7 @@ export async function separateVocalsMVSEP(
       console.log(`[mvsep] Still processing... ${remaining}s remaining`)
     }
 
-    console.warn('[mvsep] Timed out after 45s — will fall back to full-mix transcription')
+    console.warn('[mvsep] Timed out — will fall back to full-mix processing')
     return null
   } catch (err) {
     console.warn('[mvsep] Error:', err instanceof Error ? err.message : String(err))

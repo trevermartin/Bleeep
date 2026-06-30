@@ -2,10 +2,10 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { createClient } from '@/lib/supabase/server'
 import { isProfane, WORD_BOOST } from '@/lib/profanity-list'
-import { parseFilename, fetchLrcLyrics, parseLrc, detectProfanityInLyrics } from '@/lib/lrclib'
+import { parseFilename, parseLrc, detectProfanityInLyrics } from '@/lib/lrclib'
 import { trackFingerprint } from '@/lib/fingerprint'
 import { renderCleanAudio, downloadToFile } from '@/lib/audio'
-import { separateVocalsMVSEP } from '@/lib/mvsep'
+import { separateStemsMVSEP, type MvsepStems } from '@/lib/mvsep'
 import path from 'path'
 import os from 'os'
 import fs from 'fs'
@@ -142,12 +142,27 @@ export async function POST(request: NextRequest) {
   })
 
   try {
-    // ── Step 6: Detect profanity (manual lyrics → community → LRCLIB → AssemblyAI) ──
+    // ── Step 6: Detect profanity ──────────────────────────────────────────────
+    // AI transcription (AssemblyAI on the isolated vocal stem) is the PRIMARY
+    // path so the clickable word-level transcript panel is always available.
+    // Genius lyrics, if present, ride along as keyterm hints (not a replacement).
+    // Manual pasted LRC and community-verified timestamps remain explicit
+    // high-confidence overrides.
     let detectedWords: DetectedWord[] = []
     // Full word-level transcript (only populated by the AssemblyAI path) so the
     // review UI can offer a clickable word-by-word selection panel.
     let transcriptWords: Array<{ word: string; start: number; end: number }> = []
     let detectionMethod: 'lyrics' | 'ai' | 'community' = 'ai'
+
+    // MVSEP stems are needed both for transcription (vocals) and for the
+    // vocal-only render (vocals + instrumental). Run separation at most once and
+    // cache it. undefined = not attempted, null = attempted but unavailable
+    // (callers fall back to the full mix).
+    let stems: MvsepStems | null | undefined = undefined
+    const getStems = async (): Promise<MvsepStems | null> => {
+      if (stems === undefined) stems = await separateStemsMVSEP(originalUrl, 45000)
+      return stems
+    }
 
     // 6a. Manual lyrics pasted by the user — highest priority
     const manualLyrics = body.manualLyrics
@@ -197,22 +212,10 @@ export async function POST(request: NextRequest) {
       console.warn('[process] Community lookup failed:', communityErr)
     }
 
-    // 6c. LRCLIB (if no manual lyrics or community match)
-    if (detectionMethod === 'ai') try {
-      const lrcText = await fetchLrcLyrics(parsed.artist, parsed.track)
-      if (lrcText) {
-        const lines = parseLrc(lrcText)
-        detectedWords = detectProfanityInLyrics(lines, muteType as 'mute' | 'warp')
-        detectionMethod = 'lyrics'
-        console.log(`[process] Lyrics route: ${lines.length} lines, ${detectedWords.length} profane found`)
-      } else {
-        console.log('[process] No synced lyrics on LRCLIB — falling back to AssemblyAI')
-      }
-    } catch (lrcErr) {
-      console.warn('[process] LRCLIB failed — falling back to AssemblyAI:', lrcErr)
-    }
-
-    // ── Step 7: AssemblyAI fallback (if neither manual lyrics nor LRCLIB matched) ──
+    // ── Step 7: AssemblyAI transcription (primary path) ───────────────────────
+    // Runs unless an explicit override (manual LRC or community) already
+    // produced timestamps. LRCLIB lyrics-matching has been removed — AI
+    // transcription with Genius keyterm hints is now the default.
     if (detectionMethod === 'ai') {
       const assemblyApiKey = process.env.ASSEMBLYAI_API_KEY
       if (!assemblyApiKey) throw new Error('ASSEMBLYAI_API_KEY is not set')
@@ -236,11 +239,13 @@ export async function POST(request: NextRequest) {
         console.log(`[process] Genius lyrics → ${lyricTerms.length} key terms added for alignment`)
       }
 
-      // Attempt MVSEP vocal isolation (45s timeout). Falls back to full mix on any failure.
-      let transcribeUrl = originalUrl
-      const vocalsUrl = await separateVocalsMVSEP(originalUrl, 45000)
-      if (vocalsUrl) {
-        transcribeUrl = vocalsUrl
+      // Attempt MVSEP stem separation (45s timeout, cached for the render step).
+      // Transcribe the isolated vocal stem when available — WAV stems are
+      // sample-aligned with the full mix so transcript timestamps stay in sync
+      // with the review waveform. Falls back to the full mix on any failure.
+      const s = await getStems()
+      const transcribeUrl = s?.vocals ?? originalUrl
+      if (s?.vocals) {
         console.log('[process] MVSEP vocal stem ready — using isolated vocals for transcription')
       } else {
         console.log('[process] MVSEP unavailable/timeout — transcribing full mix')
@@ -304,19 +309,42 @@ export async function POST(request: NextRequest) {
       const outputPath = path.join(tmpDir, `bleeep_output_${songId}.mp3`)
       tmpFiles.push(outputPath)
 
-      // 8a. Download the full mix to /tmp
-      const ext = path.extname(originalFilename) || '.mp3'
-      const inputPath = path.join(tmpDir, `bleeep_input_${songId}${ext}`)
-      tmpFiles.push(inputPath)
-      console.log(`[process] Downloading audio for ffmpeg: ${originalUrl}`)
-      await downloadToFile(originalUrl, inputPath)
+      // 8a. Prefer the MVSEP stems (cached from the transcription step). When
+      //     both vocal + instrumental stems are present, mute/warp is applied
+      //     ONLY to the vocals and recombined with the 100%-untouched
+      //     instrumental, so the beat plays through even during a censored
+      //     word. If stems are missing, fall back to muting the full mix.
+      const s = await getStems()
+      if (s?.vocals && s?.instrumental) {
+        const vocalsPath = path.join(tmpDir, `bleeep_vocals_${songId}.wav`)
+        const instrumentalPath = path.join(tmpDir, `bleeep_instrumental_${songId}.wav`)
+        tmpFiles.push(vocalsPath, instrumentalPath)
+        console.log('[process] Downloading MVSEP stems for vocal-only render...')
+        await downloadToFile(s.vocals, vocalsPath)
+        await downloadToFile(s.instrumental, instrumentalPath)
 
-      // 8b. Render: mute or warp the detected words
-      await renderCleanAudio({
-        words: detectedWords,
-        outputPath,
-        inputPath,
-      })
+        // 8b. Render: mute/warp the vocal stem, keep instrumental untouched
+        await renderCleanAudio({
+          words: detectedWords,
+          outputPath,
+          vocalsPath,
+          instrumentalPath,
+        })
+      } else {
+        // Fallback: full-mix muting (background music affected during words)
+        const ext = path.extname(originalFilename) || '.mp3'
+        const inputPath = path.join(tmpDir, `bleeep_input_${songId}${ext}`)
+        tmpFiles.push(inputPath)
+        console.log(`[process] No stems — full-mix render. Downloading: ${originalUrl}`)
+        await downloadToFile(originalUrl, inputPath)
+
+        // 8b. Render: mute or warp the detected words on the full mix
+        await renderCleanAudio({
+          words: detectedWords,
+          outputPath,
+          inputPath,
+        })
+      }
 
       // Upload clean file to Supabase
       const cleanStoragePath = `clean/${user.id}/${songId}_clean.mp3`
@@ -341,12 +369,18 @@ export async function POST(request: NextRequest) {
     }
 
     // ── Step 9: Save final record to DB ──────────────────────────────────────
+    // Persist MVSEP stem URLs so reprocess can reuse them (vocal-only render)
+    // without paying for a second separation. getStems() returns the cached
+    // result; null when separation was skipped or unavailable.
+    const finalStems = await getStems()
     await adminSupabase
       .from('songs')
       .update({
         clean_url: cleanUrl,
         words_detected: detectedWords,
         status: 'complete',
+        vocals_url: finalStems?.vocals ?? null,
+        instrumental_url: finalStems?.instrumental ?? null,
       })
       .eq('id', songId)
 

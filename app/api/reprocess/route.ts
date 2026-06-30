@@ -44,10 +44,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
   }
 
-  // Verify the song belongs to this user
+  // Verify the song belongs to this user, and pull the persisted MVSEP stem
+  // URLs so we can re-render vocal-only (instrumental stays 100% intact).
   const { data: song } = await adminSupabase
     .from('songs')
-    .select('id')
+    .select('id, vocals_url, instrumental_url')
     .eq('id', songId)
     .eq('user_id', user.id)
     .single()
@@ -68,17 +69,37 @@ export async function POST(request: NextRequest) {
 
       console.log('[reprocess] ffmpeg windows:', wordsDetected.map((w) => `${w.start}–${w.end}s`).join(', '))
 
-      const ext = path.extname(originalFilename) || '.mp3'
-      const inputPath = path.join(tmpDir, `bleeep_repr_${songId}${ext}`)
-      tmpFiles.push(inputPath)
-      console.log(`[reprocess] Downloading audio: ${originalUrl}`)
-      await downloadToFile(originalUrl, inputPath)
+      // Reuse the persisted MVSEP stems when available: mute/warp the vocals
+      // only and recombine with the untouched instrumental so the beat plays
+      // through 100% during censored words. Fall back to full-mix muting if the
+      // stems are missing (e.g. older songs processed before isolation existed).
+      if (song.vocals_url && song.instrumental_url) {
+        const vocalsPath = path.join(tmpDir, `bleeep_repr_vocals_${songId}.wav`)
+        const instrumentalPath = path.join(tmpDir, `bleeep_repr_instr_${songId}.wav`)
+        tmpFiles.push(vocalsPath, instrumentalPath)
+        console.log('[reprocess] Downloading persisted MVSEP stems for vocal-only render...')
+        await downloadToFile(song.vocals_url, vocalsPath)
+        await downloadToFile(song.instrumental_url, instrumentalPath)
 
-      await renderCleanAudio({
-        words: wordsDetected,
-        outputPath,
-        inputPath,
-      })
+        await renderCleanAudio({
+          words: wordsDetected,
+          outputPath,
+          vocalsPath,
+          instrumentalPath,
+        })
+      } else {
+        const ext = path.extname(originalFilename) || '.mp3'
+        const inputPath = path.join(tmpDir, `bleeep_repr_${songId}${ext}`)
+        tmpFiles.push(inputPath)
+        console.log(`[reprocess] No stems — full-mix render. Downloading: ${originalUrl}`)
+        await downloadToFile(originalUrl, inputPath)
+
+        await renderCleanAudio({
+          words: wordsDetected,
+          outputPath,
+          inputPath,
+        })
+      }
 
       // Upload — upsert:true since a clean file may already exist from the initial process run
       const cleanStoragePath = `clean/${user.id}/${songId}_clean.mp3`
