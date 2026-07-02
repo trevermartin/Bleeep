@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useDropzone } from 'react-dropzone'
 import Link from 'next/link'
 import toast from 'react-hot-toast'
@@ -8,6 +8,7 @@ import { v4 as uuidv4 } from 'uuid'
 import dynamic from 'next/dynamic'
 import Navbar from '@/components/Navbar'
 import { createClient } from '@/lib/supabase/client'
+import { subscribeToJob, type JobRow, type JobSongRow } from '@/lib/jobs-client'
 import type { Profile, Song, DetectedWord, ProcessingStatus, MuteType, DetectionMethod } from '@/types'
 import type { ReviewWord, TranscriptWord } from '@/components/WaveformReview'
 
@@ -27,7 +28,24 @@ const STAGE_LABELS: Record<ProcessingStatus['stage'], string> = {
   failed: 'Something went wrong.',
 }
 
-const PROCESS_TIMEOUT_MS = 6 * 60 * 1000
+// Maps a Railway worker job stage to the dashboard's progress UI. Every
+// intermediate stage renders the same spinner (the `stage` field only switches
+// the view to failed/complete), so we keep stage='processing' and vary the
+// message + progress instead.
+const JOB_STAGE_UI: Record<string, { message: string; progress: number }> = {
+  pending: { message: 'Queued — waiting for a worker…', progress: 8 },
+  claimed: { message: 'Starting…', progress: 14 },
+  downloading: { message: 'Downloading audio…', progress: 28 },
+  isolating: { message: 'Isolating vocals…', progress: 46 },
+  transcribing: { message: 'Transcribing lyrics…', progress: 64 },
+  processing: { message: 'Cleaning audio…', progress: 82 },
+  uploading: { message: 'Finalizing…', progress: 93 },
+}
+
+function jobStageToStatus(stage: string): ProcessingStatus {
+  const ui = JOB_STAGE_UI[stage] ?? { message: 'Processing…', progress: 50 }
+  return { stage: 'processing', message: ui.message, progress: ui.progress }
+}
 
 function censorDisplay(word: string): string {
   if (word.length <= 1) return '*'
@@ -64,14 +82,72 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
   // ── Import tab state ─────────────────────────────────────────────────────────
   const [uploadTab, setUploadTab] = useState<'file' | 'soundcloud'>('file')
   const [soundcloudUrl, setSoundcloudUrl] = useState('')
-  const [isSoundcloudImporting, setIsSoundcloudImporting] = useState(false)
   const [soundcloudError, setSoundcloudError] = useState<string | null>(null)
   const [howToExpanded, setHowToExpanded] = useState(false)
   const [scSong, setScSong] = useState('')
   const [scArtist, setScArtist] = useState('')
   const [scAlbum, setScAlbum] = useState('')
   const [geniusLyrics, setGeniusLyrics] = useState<string | null>(null)
+  const [scFoundMeta, setScFoundMeta] = useState<{ title: string; artist: string } | null>(null)
   const [isScSearching, setIsScSearching] = useState(false)
+
+  // Live Realtime subscription to the in-flight worker job. Torn down on
+  // completion, before a new job, and on unmount.
+  const jobUnsubRef = useRef<null | (() => void)>(null)
+  useEffect(() => () => jobUnsubRef.current?.(), [])
+
+  // Pull the latest song history (the worker inserts/updates songs rows out of
+  // band, so we re-fetch after a job settles).
+  const refreshSongs = useCallback(async () => {
+    try {
+      const r = await fetch('/api/songs')
+      if (r.ok) {
+        const d = await r.json()
+        setSongs(d.songs || [])
+      }
+    } catch {
+      // non-fatal — history just stays stale until the next refresh
+    }
+  }, [])
+
+  // Shared completion handler for 'process' jobs (file upload + SoundCloud):
+  // hand the worker's result off to the review screen exactly as before.
+  const applyCompletedJob = useCallback(
+    (fallbackFilename: string, job: JobRow, song: JobSongRow | null) => {
+      jobUnsubRef.current = null
+      setIsProcessing(false)
+
+      const originalUrl = song?.original_url ?? ''
+      const originalFilename = song?.original_filename ?? fallbackFilename
+
+      void refreshSongs()
+
+      if (!originalUrl) {
+        toast.error('Processing finished but the audio link is missing — check your song history.')
+        setStatus(null)
+        return
+      }
+
+      setStatus({ stage: 'complete', message: STAGE_LABELS.complete, progress: 100 })
+      const words: ReviewWord[] = (job.words_detected ?? []).map((w) => ({ ...w, id: uuidv4() }))
+      setPendingReview({
+        songId: job.song_id,
+        originalUrl,
+        originalFilename,
+        words,
+        transcript: (job.transcript ?? []) as TranscriptWord[],
+        detectionMethod: (job.detection_method ?? 'ai') as DetectionMethod,
+      })
+
+      const wc = words.length
+      toast.success(
+        wc === 0
+          ? 'No profanity detected!'
+          : `Found ${wc} word${wc !== 1 ? 's' : ''} — review the list below.`
+      )
+    },
+    [refreshSongs]
+  )
 
   const FREE_LIMIT = 3
   const isPro = profile?.plan === 'pro'
@@ -79,6 +155,9 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
   const atLimit = !isPro && usedThisMonth >= FREE_LIMIT
 
   // ── Upload + initial processing ─────────────────────────────────────────────
+  // Upload the file to storage, enqueue a worker job, then subscribe to its
+  // status via Realtime. The worker runs the heavy pipeline (isolate/transcribe/
+  // render) with no serverless time limit and writes the result back.
   const onDrop = useCallback(
     async (acceptedFiles: File[]) => {
       const file = acceptedFiles[0]
@@ -88,13 +167,15 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
         return
       }
 
+      // Tear down any prior subscription before starting a new job.
+      jobUnsubRef.current?.()
+      jobUnsubRef.current = null
+
       setResult(null)
       setPendingReview(null)
       setIsProcessing(true)
 
       const supabase = createClient()
-      const abortController = new AbortController()
-      const timeoutId = setTimeout(() => abortController.abort(), PROCESS_TIMEOUT_MS)
 
       try {
         const {
@@ -121,7 +202,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
         const { data: urlData } = supabase.storage.from('audio').getPublicUrl(storagePath)
         const originalUrl = urlData.publicUrl
 
-        setStatus({ stage: 'analyzing', message: STAGE_LABELS.analyzing, progress: 30 })
+        setStatus(jobStageToStatus('pending'))
 
         const res = await fetch('/api/process', {
           method: 'POST',
@@ -133,10 +214,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
             muteType,
             manualLyrics: lyricsInput.trim() || undefined,
           }),
-          signal: abortController.signal,
         })
-
-        setStatus({ stage: 'processing', message: STAGE_LABELS.processing, progress: 80 })
 
         const data = await res.json()
 
@@ -144,49 +222,32 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
           if (data.upgrade) {
             toast.error('Monthly limit reached. Upgrade to Pro for unlimited songs.')
           } else {
-            toast.error(data.error || 'Processing failed. Please try again.')
+            toast.error(data.error || 'Could not start processing. Please try again.')
           }
-          setStatus({ stage: 'failed', message: data.error || 'Processing failed', progress: 0 })
+          setStatus({ stage: 'failed', message: data.error || 'Could not start processing', progress: 0 })
+          setIsProcessing(false)
           return
         }
 
-        // Hand off to the review screen instead of going straight to download
-        setStatus({ stage: 'complete', message: STAGE_LABELS.complete, progress: 100 })
-        const words: ReviewWord[] = (data.wordsDetected || []).map((w: DetectedWord) => ({
-          ...w,
-          id: uuidv4(),
-        }))
-        setPendingReview({
-          songId: data.songId,
-          originalUrl: data.originalUrl,
-          originalFilename: file.name,
-          words,
-          transcript: (data.transcript ?? []) as TranscriptWord[],
-          detectionMethod: data.detectionMethod ?? 'ai',
+        // Worker owns the pipeline now — subscribe for live progress + result.
+        jobUnsubRef.current = subscribeToJob(data.jobId, {
+          onStage: (stage) => setStatus(jobStageToStatus(stage)),
+          onComplete: ({ job, song }) => applyCompletedJob(file.name, job, song),
+          onError: (message) => {
+            toast.error(message)
+            setStatus({ stage: 'failed', message, progress: 0 })
+            setIsProcessing(false)
+          },
         })
-
-        const wc = words.length
-        toast.success(
-          wc === 0
-            ? 'No profanity detected!'
-            : `Found ${wc} word${wc !== 1 ? 's' : ''} — review the list below.`
-        )
       } catch (err) {
-        if (err instanceof Error && err.name === 'AbortError') {
-          toast.error('Processing timed out. Please try again.')
-          setStatus({ stage: 'failed', message: 'Timed out — please try again', progress: 0 })
-        } else {
-          const message = err instanceof Error ? err.message : 'An unexpected error occurred.'
-          console.error('[onDrop]', err)
-          toast.error(message)
-          setStatus({ stage: 'failed', message, progress: 0 })
-        }
-      } finally {
-        clearTimeout(timeoutId)
+        const message = err instanceof Error ? err.message : 'An unexpected error occurred.'
+        console.error('[onDrop]', err)
+        toast.error(message)
+        setStatus({ stage: 'failed', message, progress: 0 })
         setIsProcessing(false)
       }
     },
-    [muteType, atLimit, lyricsInput]
+    [muteType, atLimit, lyricsInput, applyCompletedJob]
   )
 
   // ── SoundCloud search ────────────────────────────────────────────────────────
@@ -198,6 +259,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
 
     setSoundcloudError(null)
     setGeniusLyrics(null)
+    setScFoundMeta(null)
     setIsScSearching(true)
     try {
       const res = await fetch('/api/soundcloud/search', {
@@ -212,6 +274,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
       }
       setSoundcloudUrl(data.url)
       setGeniusLyrics(data.geniusLyrics ?? null)
+      setScFoundMeta({ title: data.title ?? '', artist: data.artist ?? '' })
       toast.success(
         (data.artist ? `Found "${data.title}" by ${data.artist}` : `Found "${data.title}"`) +
           (data.geniusLyrics ? ' · lyrics matched' : '')
@@ -224,99 +287,71 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
   }
 
   // ── SoundCloud import ────────────────────────────────────────────────────────
+  // One call: enqueue a worker job that downloads the track AND runs the full
+  // pipeline. The worker backfills the song's real URL/filename; we subscribe
+  // for live progress + the result, just like the file-upload path.
   const handleSoundcloudImport = async () => {
     const url = soundcloudUrl.trim()
     if (!url) return
     if (atLimit) { toast.error("You've reached your free limit. Upgrade to Pro!"); return }
 
+    // Tear down any prior subscription before starting a new job.
+    jobUnsubRef.current?.()
+    jobUnsubRef.current = null
+
+    const fallbackName = scFoundMeta?.title
+      ? `${scFoundMeta.artist ? `${scFoundMeta.artist} - ` : ''}${scFoundMeta.title}.mp3`
+      : 'SoundCloud import.mp3'
+
     setResult(null)
     setPendingReview(null)
     setSoundcloudError(null)
-    setIsSoundcloudImporting(true)
-
-    const abortController = new AbortController()
-    const timeoutId = setTimeout(() => abortController.abort(), PROCESS_TIMEOUT_MS)
+    setIsProcessing(true)
+    setStatus(jobStageToStatus('pending'))
 
     try {
-      setStatus({ stage: 'uploading', message: 'Downloading SoundCloud audio…', progress: 15 })
-      const scRes = await fetch('/api/soundcloud', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ soundcloudUrl: url }),
-        signal: abortController.signal,
-      })
-      const scData = await scRes.json()
-      if (!scRes.ok) {
-        setSoundcloudError(scData.error || 'Failed to import SoundCloud track')
-        setStatus(null)
-        return
-      }
-
-      setIsSoundcloudImporting(false)
-      setIsProcessing(true)
-      setStatus({ stage: 'analyzing', message: STAGE_LABELS.analyzing, progress: 30 })
-
-      const processRes = await fetch('/api/process', {
+      const res = await fetch('/api/soundcloud', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          songId: scData.songId,
-          originalUrl: scData.originalUrl,
-          originalFilename: scData.originalFilename,
-          muteType,
-          manualLyrics: lyricsInput.trim() || undefined,
+          soundcloudUrl: url,
+          trackTitle: scFoundMeta?.title || undefined,
+          artistName: scFoundMeta?.artist || undefined,
           geniusLyrics: geniusLyrics || undefined,
+          muteType,
         }),
-        signal: abortController.signal,
       })
+      const data = await res.json()
 
-      setStatus({ stage: 'processing', message: STAGE_LABELS.processing, progress: 80 })
-      const data = await processRes.json()
-
-      if (!processRes.ok) {
+      if (!res.ok) {
         if (data.upgrade) {
           toast.error('Monthly limit reached. Upgrade to Pro for unlimited songs.')
+          setStatus({ stage: 'failed', message: data.error || 'Monthly limit reached', progress: 0 })
         } else {
-          toast.error(data.error || 'Processing failed. Please try again.')
+          setSoundcloudError(data.error || 'Failed to import SoundCloud track')
+          setStatus(null)
         }
-        setStatus({ stage: 'failed', message: data.error || 'Processing failed', progress: 0 })
+        setIsProcessing(false)
         return
       }
 
-      setStatus({ stage: 'complete', message: STAGE_LABELS.complete, progress: 100 })
-      const words: ReviewWord[] = (data.wordsDetected || []).map((w: DetectedWord) => ({
-        ...w,
-        id: uuidv4(),
-      }))
-      setPendingReview({
-        songId: scData.songId,
-        originalUrl: scData.originalUrl,
-        originalFilename: scData.originalFilename,
-        words,
-        transcript: (data.transcript ?? []) as TranscriptWord[],
-        detectionMethod: data.detectionMethod ?? 'ai',
-      })
       setSoundcloudUrl('')
       setGeniusLyrics(null)
+      setScFoundMeta(null)
 
-      const wc = words.length
-      toast.success(
-        wc === 0
-          ? 'No profanity detected!'
-          : `Found ${wc} word${wc !== 1 ? 's' : ''} — review the list below.`
-      )
+      jobUnsubRef.current = subscribeToJob(data.jobId, {
+        onStage: (stage) => setStatus(jobStageToStatus(stage)),
+        onComplete: ({ job, song }) => applyCompletedJob(fallbackName, job, song),
+        onError: (message) => {
+          toast.error(message)
+          setStatus({ stage: 'failed', message, progress: 0 })
+          setIsProcessing(false)
+        },
+      })
     } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        toast.error('Import timed out. Please try again.')
-        setStatus({ stage: 'failed', message: 'Timed out — please try again', progress: 0 })
-      } else {
-        const message = err instanceof Error ? err.message : 'An unexpected error occurred.'
-        toast.error(message)
-        setStatus({ stage: 'failed', message, progress: 0 })
-      }
-    } finally {
-      clearTimeout(timeoutId)
-      setIsSoundcloudImporting(false)
+      const message = err instanceof Error ? err.message : 'An unexpected error occurred.'
+      toast.error(message)
+      setStatus({ stage: 'failed', message, progress: 0 })
       setIsProcessing(false)
     }
   }
@@ -328,65 +363,64 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
 
   const handleConfirm = async () => {
     if (!pendingReview) return
+
+    // Tear down any prior subscription before enqueueing the re-render.
+    jobUnsubRef.current?.()
+    jobUnsubRef.current = null
+
     setIsReprocessing(true)
 
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), PROCESS_TIMEOUT_MS)
+    // Capture what the completion callback needs — pendingReview is cleared when
+    // the render finishes.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const finalWords = pendingReview.words.map(({ id: _id, ...w }) => w)
+    const songId = pendingReview.songId
+    const method = pendingReview.detectionMethod
 
     try {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const wordsToSend = pendingReview.words.map(({ id: _id, ...w }) => w)
-      console.log('[handleConfirm] Sending to /api/reprocess:', JSON.stringify(wordsToSend))
       const res = await fetch('/api/reprocess', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          songId: pendingReview.songId,
-          originalUrl: pendingReview.originalUrl,
-          originalFilename: pendingReview.originalFilename,
-          wordsDetected: wordsToSend,
-        }),
-        signal: controller.signal,
+        body: JSON.stringify({ songId, wordsDetected: finalWords }),
       })
-
-      clearTimeout(timeoutId)
       const data = await res.json()
 
       if (!res.ok) {
-        toast.error(data.error || 'Processing failed. Please try again.')
+        toast.error(data.error || 'Could not start re-render. Please try again.')
+        setIsReprocessing(false)
         return
       }
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const finalWords = pendingReview.words.map(({ id: _id, ...w }) => w)
-      setResult({
-        cleanUrl: data.cleanUrl,
-        wordsDetected: finalWords,
-        songId: pendingReview.songId,
-        detectionMethod: pendingReview.detectionMethod,
+      // Worker re-renders using the persisted stems; subscribe for the result.
+      jobUnsubRef.current = subscribeToJob(data.jobId, {
+        onComplete: ({ job, song }) => {
+          jobUnsubRef.current = null
+          setIsReprocessing(false)
+          const words = job.words_detected ?? finalWords
+          setResult({
+            cleanUrl: song?.clean_url ?? '',
+            wordsDetected: words,
+            songId,
+            detectionMethod: method,
+          })
+          setPendingReview(null)
+          void refreshSongs()
+
+          const wc = words.length
+          toast.success(
+            wc === 0
+              ? 'No profanity — your song is already clean!'
+              : `Done! ${wc} word${wc !== 1 ? 's' : ''} muted.`
+          )
+        },
+        onError: (message) => {
+          jobUnsubRef.current = null
+          setIsReprocessing(false)
+          toast.error(message)
+        },
       })
-      setPendingReview(null)
-
-      const refreshRes = await fetch('/api/songs')
-      if (refreshRes.ok) {
-        const refreshData = await refreshRes.json()
-        setSongs(refreshData.songs || [])
-      }
-
-      const wc = finalWords.length
-      toast.success(
-        wc === 0
-          ? 'No profanity — your song is already clean!'
-          : `Done! ${wc} word${wc !== 1 ? 's' : ''} muted.`
-      )
     } catch (err) {
-      clearTimeout(timeoutId)
-      if (err instanceof Error && err.name === 'AbortError') {
-        toast.error('Processing timed out. Please try again.')
-      } else {
-        toast.error(err instanceof Error ? err.message : 'Processing failed.')
-      }
-    } finally {
+      toast.error(err instanceof Error ? err.message : 'Could not start re-render.')
       setIsReprocessing(false)
     }
   }
@@ -485,7 +519,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
                   <button
                     key={type}
                     onClick={() => setMuteType(type)}
-                    disabled={isProcessing || isSoundcloudImporting}
+                    disabled={isProcessing}
                     className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
                       muteType === type
                         ? 'bg-violet-600 text-white'
@@ -499,7 +533,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
             </div>
 
             {/* Processing / loading state — shared across file and SoundCloud imports */}
-            {(isProcessing || isSoundcloudImporting) ? (
+            {isProcessing ? (
               <div className="border-2 border-violet-500/30 bg-violet-600/5 rounded-2xl p-12 text-center">
                 <div className="w-16 h-16 rounded-2xl bg-violet-600/20 flex items-center justify-center mx-auto mb-4">
                   <div className="w-8 h-8 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
@@ -781,7 +815,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
             )}
 
             {/* Manual lyrics input — expandable, hidden while processing */}
-            {!isProcessing && !isSoundcloudImporting && (
+            {!isProcessing && (
               <div className="mt-3">
                 <button
                   type="button"

@@ -1,16 +1,14 @@
-/* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any, prefer-const */
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { createClient } from '@/lib/supabase/server'
-import path from 'path'
-import os from 'os'
-import fs from 'fs'
 import { v4 as uuidv4 } from 'uuid'
-import { getYtDlpPath, getFfmpegDir, runYtDlp } from '@/lib/ytdlp'
 
-export const maxDuration = 300
-
-// ── helpers ───────────────────────────────────────────────────────────────────
+// Thin job-creator. yt-dlp download + MP3 conversion (which blew past Vercel's
+// serverless wall on long tracks) now runs on the Railway worker. This route
+// validates the URL, inserts a placeholder song row so it shows in the library
+// immediately, and enqueues a 'process' job with source_type='soundcloud'. The
+// worker downloads the track, uploads it to storage, backfills the song's
+// original_url/filename, then runs the full pipeline.
 
 function sanitize(s: string): string {
   return s.replace(/[/\\?%*:|"<>]/g, '').replace(/\s+/g, ' ').trim()
@@ -46,8 +44,6 @@ function isPlaylistUrl(url: string): boolean {
   }
 }
 
-// ── main handler ──────────────────────────────────────────────────────────────
-
 export async function POST(request: NextRequest) {
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
     return NextResponse.json({ error: 'Server misconfiguration' }, { status: 500 })
@@ -56,17 +52,25 @@ export async function POST(request: NextRequest) {
   const supabase = await createClient()
   const adminSupabase = createAdminClient()
 
-  const { data: { user } } = await supabase.auth.getUser()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  let body: { soundcloudUrl: string }
+  let body: {
+    soundcloudUrl: string
+    trackTitle?: string
+    artistName?: string
+    geniusLyrics?: string
+    muteType?: string
+  }
   try {
     body = await request.json()
   } catch {
     return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
   }
 
-  const { soundcloudUrl } = body
+  const { soundcloudUrl, muteType = 'mute' } = body
   if (!soundcloudUrl) {
     return NextResponse.json({ error: 'Missing soundcloudUrl' }, { status: 400 })
   }
@@ -86,104 +90,100 @@ export async function POST(request: NextRequest) {
     )
   }
 
+  // ── Ensure profile + enforce plan limit (same as the upload path) ───────────
+  const { data: profile0, error: selectErr } = await adminSupabase
+    .from('profiles')
+    .select('*')
+    .eq('id', user.id)
+    .single()
+
+  if (selectErr && selectErr.code !== 'PGRST116') {
+    console.error('[soundcloud] Profile SELECT error:', selectErr.code, selectErr.message)
+    return NextResponse.json(
+      { error: `Profile lookup failed: ${selectErr.message} (code: ${selectErr.code})` },
+      { status: 500 }
+    )
+  }
+
+  let profile = profile0
+  if (!profile) {
+    const { data: newProfile, error: insertErr } = await adminSupabase
+      .from('profiles')
+      .insert({ id: user.id, email: user.email ?? '', plan: 'free', songs_processed_this_month: 0 })
+      .select()
+      .single()
+    if (insertErr || !newProfile) {
+      console.error('[soundcloud] Profile INSERT failed:', insertErr?.message)
+      return NextResponse.json(
+        { error: `Could not create user profile: ${insertErr?.message ?? 'unknown'}` },
+        { status: 500 }
+      )
+    }
+    profile = newProfile
+  }
+
+  const FREE_LIMIT = 3
+  if (profile.plan === 'free' && profile.songs_processed_this_month >= FREE_LIMIT) {
+    return NextResponse.json(
+      {
+        error: 'Monthly limit reached',
+        message: `You've used all ${FREE_LIMIT} free songs this month.`,
+        upgrade: true,
+      },
+      { status: 429 }
+    )
+  }
+
+  // ── Insert placeholder song + enqueue the download-and-process job ──────────
   const songId = uuidv4()
-  const tmpDir = os.tmpdir()
-  const mp3Path = path.join(tmpDir, `sc_${songId}.mp3`)
+  const trackTitle = (body.trackTitle ?? '').trim()
+  const artistName = (body.artistName ?? '').trim()
+  // Best-effort display name until the worker fetches the real metadata and
+  // backfills original_filename. Falls back to a generic label.
+  const placeholderFilename =
+    trackTitle || artistName ? buildFilename(trackTitle || 'SoundCloud track', artistName) : 'SoundCloud import.mp3'
 
-  let ytdlpPath: string
-  let ffmpegDir: string
-  try {
-    ytdlpPath = getYtDlpPath()
-    ffmpegDir = getFfmpegDir()
-    console.log(`[soundcloud] yt-dlp: ${ytdlpPath}, ffmpeg dir: ${ffmpegDir}`)
-  } catch (err: any) {
-    const msg = err instanceof Error ? err.message : String(err)
-    console.error('[soundcloud] Binary setup failed:', msg)
-    return NextResponse.json({ error: `Binary setup failed: ${msg}` }, { status: 500 })
+  const { error: songErr } = await adminSupabase.from('songs').insert({
+    id: songId,
+    user_id: user.id,
+    original_filename: placeholderFilename,
+    status: 'processing',
+    words_detected: [],
+  })
+
+  if (songErr) {
+    console.error('[soundcloud] Song INSERT failed:', songErr.message)
+    return NextResponse.json({ error: `Could not create song: ${songErr.message}` }, { status: 500 })
   }
 
-  try {
-    // ── Step 1: Fetch metadata (no download) ─────────────────────────────────
-    console.log(`[soundcloud] Step 1: fetching metadata for ${url}`)
-    let trackTitle = 'Unknown Track'
-    let artistName = ''
-    try {
-      const { stdout } = await runYtDlp(ytdlpPath, [
-        '--no-playlist',
-        '--ffmpeg-location', ffmpegDir,
-        '--print', '%(uploader)s|||%(title)s',
-        url,
-      ])
-      const line = stdout.trim().split('\n')[0] ?? ''
-      const sep = line.indexOf('|||')
-      if (sep !== -1) {
-        artistName = line.slice(0, sep).trim()
-        trackTitle = line.slice(sep + 3).trim()
-      } else {
-        trackTitle = line || trackTitle
-      }
-    } catch (err: any) {
-      const msg = err instanceof Error ? err.message : String(err)
-      console.error('[soundcloud] Step 1 FAILED:', msg)
-      if (/private|unavailable|not exist|removed/i.test(msg)) {
-        return NextResponse.json({ error: "This track is private or unavailable." }, { status: 422 })
-      }
-      return NextResponse.json({ error: `Step 1 failed — ${msg}` }, { status: 502 })
-    }
-
-    const originalFilename = buildFilename(trackTitle, artistName)
-    console.log(`[soundcloud] Track: "${trackTitle}" by "${artistName}" → "${originalFilename}"`)
-
-    // ── Step 2: Download + convert to MP3 ────────────────────────────────────
-    console.log(`[soundcloud] Step 2: downloading and converting to MP3 → ${mp3Path}`)
-    try {
-      await runYtDlp(ytdlpPath, [
-        '--no-playlist',
-        '--ffmpeg-location', ffmpegDir,
-        '-x',
-        '--audio-format', 'mp3',
-        '--audio-quality', '0',
-        '-o', mp3Path,
-        url,
-      ])
-    } catch (err: any) {
-      const msg = err instanceof Error ? err.message : String(err)
-      console.error('[soundcloud] Step 2 FAILED:', msg)
-      return NextResponse.json({ error: `Step 2 failed — ${msg}` }, { status: 502 })
-    }
-
-    if (!fs.existsSync(mp3Path)) {
-      console.error('[soundcloud] Step 2: mp3 file not found after yt-dlp:', mp3Path)
-      return NextResponse.json({ error: 'Download completed but output file not found.' }, { status: 500 })
-    }
-    console.log(`[soundcloud] Step 2: MP3 ready (${fs.statSync(mp3Path).size} bytes)`)
-
-    // ── Step 3: Upload to Supabase Storage ────────────────────────────────────
-    const storagePath = `originals/${user.id}/${songId}.mp3`
-    const mp3Buffer = fs.readFileSync(mp3Path)
-    console.log(`[soundcloud] Step 3: uploading ${mp3Buffer.length} bytes → ${storagePath}`)
-
-    const { error: uploadErr } = await adminSupabase.storage
-      .from('audio')
-      .upload(storagePath, mp3Buffer, { contentType: 'audio/mpeg', upsert: false })
-
-    if (uploadErr) throw new Error(`Step 3 failed — storage: ${uploadErr.message}`)
-
-    const { data: urlData } = adminSupabase.storage.from('audio').getPublicUrl(storagePath)
-
-    console.log(`[soundcloud] Done. songId=${songId}`)
-    return NextResponse.json({
-      songId,
-      originalUrl: urlData.publicUrl,
-      originalFilename,
-      trackTitle,
-      artistName,
+  const { data: job, error: jobErr } = await adminSupabase
+    .from('processing_jobs')
+    .insert({
+      user_id: user.id,
+      song_id: songId,
+      job_type: 'process',
+      status: 'pending',
+      source_type: 'soundcloud',
+      source_url: url,
+      original_filename: placeholderFilename,
+      song_name: trackTitle || null,
+      artist: artistName || null,
+      mute_type: muteType,
+      genius_lyrics: body.geniusLyrics ?? null,
     })
-  } catch (err: any) {
-    const message = err instanceof Error ? err.message : String(err ?? 'SoundCloud import failed')
-    console.error(`[soundcloud] Unhandled error for url=${url}:`, err)
-    return NextResponse.json({ error: message }, { status: 500 })
-  } finally {
-    try { if (fs.existsSync(mp3Path)) fs.unlinkSync(mp3Path) } catch { /* non-fatal */ }
+    .select('id')
+    .single()
+
+  if (jobErr || !job) {
+    console.error('[soundcloud] Job INSERT failed:', jobErr?.message)
+    await adminSupabase.from('songs').update({ status: 'failed' }).eq('id', songId)
+    return NextResponse.json(
+      { error: `Could not enqueue processing job: ${jobErr?.message ?? 'unknown'}` },
+      { status: 500 }
+    )
   }
+
+  console.log(`[soundcloud] Enqueued job ${job.id} for song ${songId} (soundcloud: ${url})`)
+
+  return NextResponse.json({ success: true, jobId: job.id, songId })
 }

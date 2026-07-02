@@ -1,6 +1,8 @@
 /**
  * Comprehensive profanity word list for detection.
  * All entries are lowercase. Comparison is case-insensitive.
+ *
+ * Moved verbatim from the Vercel app's lib/profanity-list.ts.
  */
 export const PROFANITY_LIST: string[] = [
   // F-word and variants

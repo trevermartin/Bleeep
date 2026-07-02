@@ -1,18 +1,5 @@
 import fs from 'fs'
-import { execSync } from 'child_process'
-import type { DetectedWord } from '@/types'
-
-/** Ensure the ffmpeg binary is executable (required in Vercel's Lambda env). */
-export function getFfmpegPath(): string {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const ffmpegPath: string = require('ffmpeg-static')
-  try {
-    execSync(`chmod +x "${ffmpegPath}"`, { stdio: 'ignore' })
-  } catch {
-    // chmod may fail if already executable — that's fine
-  }
-  return ffmpegPath
-}
+import type { DetectedWord } from '../types'
 
 /**
  * Render the clean MP3 with the given words muted or warped.
@@ -32,6 +19,11 @@ export function getFfmpegPath(): string {
  *    through at 100% even during a censored word.
  *  - Full mix (fallback): pass `inputPath`. Mute/warp is applied to the whole
  *    mix (background music is affected during censored words).
+ *
+ * Moved from the Vercel app's lib/audio.ts. The only change: ffmpeg-static is
+ * gone — the worker's Docker image installs system ffmpeg on PATH, which
+ * fluent-ffmpeg picks up automatically. The Warp/Mute parameters and the
+ * filtergraph construction are byte-for-byte identical to the Vercel version.
  */
 export async function renderCleanAudio(opts: {
   words: DetectedWord[]
@@ -47,10 +39,9 @@ export async function renderCleanAudio(opts: {
     throw new Error('renderCleanAudio: no input provided')
   }
 
-  const ffmpegPath = getFfmpegPath()
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const ffmpeg = require('fluent-ffmpeg')
-  ffmpeg.setFfmpegPath(ffmpegPath)
+  // No setFfmpegPath: system ffmpeg (installed in the Dockerfile) is on PATH.
 
   const isWarp = words.length > 0 && words.every((w) => w.mute_type === 'warp')
   console.log(

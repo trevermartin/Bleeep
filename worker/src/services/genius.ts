@@ -8,6 +8,9 @@
  *
  * Returns null on any failure — lyrics are an optional alignment aid, never a
  * hard dependency of the processing pipeline.
+ *
+ * Moved verbatim from the Vercel app's lib/genius.ts. It lives on the worker
+ * now because Genius returns HTTP 403 to Vercel's serverless IPs.
  */
 
 interface GeniusHit {
@@ -29,7 +32,7 @@ async function findSongUrl(artist: string, song: string, apiKey: string): Promis
     console.warn(`[genius] search failed: HTTP ${res.status}`)
     return null
   }
-  const data = await res.json()
+  const data = (await res.json()) as any
   const hits: GeniusHit[] = data?.response?.hits ?? []
   if (hits.length === 0) return null
   return hits[0].result.url ?? null

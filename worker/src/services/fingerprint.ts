@@ -4,13 +4,15 @@
  *
  * "Childish Gambino" + "Lithonia"   → "childish gambino::lithonia"
  * "CHILDISH GAMBINO " + "Lithonia!" → "childish gambino::lithonia"
+ *
+ * Moved verbatim from the Vercel app's lib/fingerprint.ts.
  */
 export function trackFingerprint(artist: string, track: string): string {
   const norm = (s: string) =>
     s
       .toLowerCase()
       .normalize('NFKD')
-      .replace(/[\u0300-\u036f]/g, '') // strip diacritics
+      .replace(/[̀-ͯ]/g, '') // strip diacritics
       .replace(/[^a-z0-9]+/g, ' ')
       .trim()
       .replace(/\s+/g, ' ')

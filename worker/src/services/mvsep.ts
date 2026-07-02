@@ -4,6 +4,11 @@ const MVSEP_CREATE_URL = 'https://mvsep.com/api/separation/create'
 const MVSEP_GET_URL = 'https://mvsep.com/api/separation/get'
 const POLL_INTERVAL_MS = 4000
 
+// Large safety bound only (30 min). On Railway there is no serverless wall
+// clock to fight, so we poll until MVSEP finishes; this cap just prevents a
+// permanently-stuck job from polling forever.
+const MAX_WAIT_MS = 30 * 60 * 1000
+
 export interface MvsepStems {
   vocals: string | null
   instrumental: string | null
@@ -35,7 +40,7 @@ function isInstrumental(name: string): boolean {
 
 /**
  * Submits audio at `audioUrl` to MVSEP and isolates the vocal + instrumental
- * stems. Polls until separation is ready or `timeoutMs` elapses.
+ * stems. Polls until separation is ready or the safety bound elapses.
  *
  * Returns { vocals, instrumental } URLs (either may be null if a stem wasn't
  * found), or null on total failure/timeout so callers can fall back to the
@@ -48,10 +53,15 @@ function isInstrumental(name: string): boolean {
  * perfect sync.
  *
  * sep_type 'mdx23c' = MDX23C model (2-stem: vocals + no_vocals).
+ *
+ * Moved from the Vercel app's lib/mvsep.ts. The only change: the artificial
+ * ~45s timeout is gone — the worker is a persistent process, so it waits for
+ * MVSEP to actually finish instead of giving up and falling back to the full
+ * mix (the original Vercel bug).
  */
 export async function separateStemsMVSEP(
   audioUrl: string,
-  timeoutMs = 45000
+  timeoutMs = MAX_WAIT_MS
 ): Promise<MvsepStems | null> {
   const t0 = Date.now()
   const elapsed = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`
@@ -66,10 +76,9 @@ export async function separateStemsMVSEP(
   }
 
   try {
-    console.log('[mvsep] Using file-upload method (commit 4103412+)')
     // MVSEP's create endpoint requires the actual audio bytes as a multipart
     // file upload — passing a `link` URL returns HTTP 400 "File not uploaded".
-    // So download the source from Supabase first, then upload the buffer.
+    // So download the source first, then upload the buffer.
     console.log('[mvsep] Downloading source audio for upload...')
     const srcRes = await fetch(audioUrl)
     if (!srcRes.ok) {
@@ -134,7 +143,7 @@ export async function separateStemsMVSEP(
     }
     console.log(`[mvsep] Job queued. hash=${hash} timeout=${timeoutMs}ms`)
 
-    // Poll until separation completes or timeout
+    // Poll until separation completes or the safety bound elapses.
     const deadline = Date.now() + timeoutMs
     let pollCount = 0
     while (Date.now() < deadline) {

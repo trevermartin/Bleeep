@@ -1,11 +1,43 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { getYtDlpPath, getFfmpegDir, runYtDlp } from '@/lib/ytdlp'
-import { fetchGeniusLyrics } from '@/lib/genius'
 
 export const maxDuration = 60
 
 const clean = (s: unknown) => String(s ?? '').replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 200)
+
+/**
+ * Genius lyrics lookup is offloaded to the Railway worker — Genius returns
+ * HTTP 403 to Vercel's serverless IPs. Lyrics are an optional alignment hint,
+ * so any failure (worker unreachable, no match, missing config) returns null
+ * rather than failing the search.
+ */
+async function fetchGeniusViaWorker(artist: string, song: string): Promise<string | null> {
+  const workerUrl = process.env.WORKER_URL
+  if (!workerUrl) {
+    console.warn('[soundcloud-search] WORKER_URL not set — skipping Genius lyrics hint')
+    return null
+  }
+  try {
+    const res = await fetch(`${workerUrl.replace(/\/$/, '')}/genius-lyrics`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-worker-secret': process.env.WORKER_SECRET ?? '',
+      },
+      body: JSON.stringify({ artist, song }),
+    })
+    if (!res.ok) {
+      console.warn(`[soundcloud-search] worker genius lookup failed: HTTP ${res.status}`)
+      return null
+    }
+    const data = (await res.json()) as { lyrics?: string | null }
+    return data.lyrics ?? null
+  } catch (err) {
+    console.warn('[soundcloud-search] worker genius lookup error:', err)
+    return null
+  }
+}
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient()
@@ -42,7 +74,7 @@ export async function POST(request: NextRequest) {
         '--print', '%(webpage_url)s|||%(uploader)s|||%(title)s',
         `scsearch1:${query}`,
       ]),
-      fetchGeniusLyrics(artist, song),
+      fetchGeniusViaWorker(artist, song),
     ])
 
     const line = ytResult.stdout.trim().split('\n')[0] ?? ''

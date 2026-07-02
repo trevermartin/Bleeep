@@ -1,0 +1,23 @@
+{
+  "name": "bleeep-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Railway worker that runs the heavy Bleeep audio pipeline (yt-dlp download, MVSEP isolation, AssemblyAI transcription, FFmpeg render) off Vercel's 60s serverless cap.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.106.1",
+    "express": "^4.19.2",
+    "fluent-ffmpeg": "^2.1.3"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/fluent-ffmpeg": "^2.1.28",
+    "@types/node": "^20",
+    "typescript": "^5"
+  }
+}
