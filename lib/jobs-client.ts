@@ -1,5 +1,5 @@
 import { createClient } from '@/lib/supabase/client'
-import type { DetectedWord } from '@/types'
+import type { DetectedWord, VerificationReport } from '@/types'
 
 // Browser-side subscription to a Railway worker job. Vercel enqueues a
 // processing_jobs row and returns its id; the worker updates that row's `status`
@@ -13,6 +13,8 @@ export interface JobRow {
   words_detected: DetectedWord[] | null
   transcript: Array<{ word: string; start: number; end: number }> | null
   detection_method: 'ai' | 'lyrics' | 'community' | null
+  /** Entity verification report (undefined until migration_entity.sql runs). */
+  verification?: VerificationReport | null
   error_message: string | null
 }
 
@@ -68,9 +70,12 @@ export function subscribeToJob(jobId: string, handlers: SubscribeHandlers): () =
     settled = true
     try {
       if (status === 'complete') {
+        // select('*') so the optional `verification` column (added by
+        // migration_entity.sql) is included when present but a database
+        // without it never errors the completion fetch.
         const { data: job } = await supabase
           .from('processing_jobs')
-          .select('id, song_id, status, words_detected, transcript, detection_method, error_message')
+          .select('*')
           .eq('id', jobId)
           .single()
 

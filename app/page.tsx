@@ -22,8 +22,8 @@ const steps = [
       </svg>
     ),
     step: '02',
-    title: 'AI detects every curse word',
-    desc: 'Our AI transcribes your song with word-level timestamps and pinpoints every profane word.',
+    title: 'The Entity hears every word',
+    desc: 'Our AI isolates the vocals, transcribes them word by word, and flags profanity, slurs and suggestive lines — then snaps each censor window to the natural gaps in the vocal.',
   },
   {
     icon: (
@@ -32,8 +32,8 @@ const steps = [
       </svg>
     ),
     step: '03',
-    title: 'Download your clean version',
-    desc: 'Choose to mute or warp each word. Download your clean MP3 instantly.',
+    title: 'Download a verified clean master',
+    desc: 'Mute, warp or bleep each word — only the vocal is touched, the instrumental plays through 100% intact. Every censored window is measured after rendering to prove it is clean.',
   },
 ]
 
@@ -47,8 +47,12 @@ const faqs = [
     a: 'We use AssemblyAI — one of the most accurate speech-to-text APIs available — with a comprehensive profanity word list and word boosting to maximize detection accuracy.',
   },
   {
-    q: 'What is the difference between Mute and Warp?',
-    a: 'Mute replaces the profane word with silence. Warp distorts just the word — a muffled, pitched-down wobble — so the background music keeps playing while the word itself is obscured.',
+    q: 'What is the difference between Mute, Warp and Bleep?',
+    a: 'Mute fades the vocal to silence across the word with click-free ramps. Warp replaces it with a muffled, pitched-down wobble. Bleep lays the classic broadcast tone over it. In every mode the instrumental is never processed — the music plays through 100% intact.',
+  },
+  {
+    q: 'How do I know the censored version is actually clean?',
+    a: 'After every render, the Entity re-measures the processed vocal inside each censored window. If any residual voice is detected, it widens the window and renders again automatically — and shows you the verification report with your download.',
   },
   {
     q: 'How long does processing take?',
@@ -62,7 +66,7 @@ const faqs = [
 
 export default function LandingPage() {
   return (
-    <div className="min-h-screen bg-[#0F1629]">
+    <div className="min-h-screen bg-[#0F1629] aurora-bg">
       <Navbar />
 
       {/* Hero */}
@@ -75,7 +79,7 @@ export default function LandingPage() {
         <div className="relative max-w-4xl mx-auto text-center">
           <div className="inline-flex items-center gap-2 bg-violet-600/20 border border-violet-500/30 text-violet-300 text-sm px-4 py-2 rounded-full mb-8">
             <span className="w-2 h-2 bg-violet-400 rounded-full animate-pulse" />
-            AI-powered music censorship
+            The AI entity for clean edits — now with verified renders
           </div>
 
           <h1 className="text-5xl sm:text-6xl lg:text-7xl font-extrabold text-white leading-tight mb-6">
@@ -84,8 +88,10 @@ export default function LandingPage() {
           </h1>
 
           <p className="text-xl text-white/60 max-w-2xl mx-auto mb-10 leading-relaxed">
-            Upload any song — Bleeep automatically removes every curse word
-            and gives you a clean version to download.
+            Upload any song — the Bleeep Entity finds every curse word and
+            suggestive line, censors only the vocal, and hands you a clean
+            master with the instrumental completely untouched. Verified, every
+            time.
           </p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">

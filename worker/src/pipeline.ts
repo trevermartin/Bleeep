@@ -2,11 +2,11 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { supabase } from './supabase'
-import type { DetectedWord, JobStatus, ProcessingJob, TranscriptWord } from './types'
+import type { DetectedWord, JobStatus, ProcessingJob, TranscriptWord, VerificationReport } from './types'
 import { separateStemsMVSEP, type MvsepStems } from './services/mvsep'
 import { transcribeAudio } from './services/assemblyai'
-import { renderCleanAudio, downloadToFile } from './services/audio'
-import { isProfane, WORD_BOOST } from './services/profanity'
+import { downloadToFile } from './services/audio'
+import { censorAndVerify, detectContent, WORD_BOOST } from './entity'
 import { parseFilename, parseLrc, detectProfanityInLyrics } from './services/lrclib'
 import { trackFingerprint } from './services/fingerprint'
 import {
@@ -33,6 +33,29 @@ async function setJobStatus(
 
 function publicUrl(storagePath: string): string {
   return supabase.storage.from(BUCKET).getPublicUrl(storagePath).data.publicUrl
+}
+
+/**
+ * Best-effort persistence of the Entity's verification report. Kept separate
+ * from the required row updates so a database without the `verification`
+ * column (migration_entity.sql not applied yet) can never fail the job.
+ */
+async function persistVerification(
+  jobId: string,
+  songId: string,
+  verification: VerificationReport | null
+): Promise<void> {
+  if (!verification) return
+  const { error: jobErr } = await supabase
+    .from('processing_jobs')
+    .update({ verification })
+    .eq('id', jobId)
+  if (jobErr) console.warn(`[pipeline] verification save (job) skipped: ${jobErr.message}`)
+  const { error: songErr } = await supabase
+    .from('songs')
+    .update({ verification })
+    .eq('id', songId)
+  if (songErr) console.warn(`[pipeline] verification save (song) skipped: ${songErr.message}`)
 }
 
 /** Dispatch a claimed job to the matching pipeline. */
@@ -205,14 +228,9 @@ async function runProcessJob(job: ProcessingJob): Promise<void> {
         end: w.end / 1000,
       }))
 
-      detectedWords = rawWords
-        .filter((w) => isProfane(w.text))
-        .map((w) => ({
-          word: w.text,
-          start: w.start / 1000,
-          end: w.end / 1000,
-          mute_type: muteType,
-        }))
+      // The Entity scans the full transcript: profanity, slurs, suggestive
+      // phrases — each hit carries category/severity/confidence for review.
+      detectedWords = detectContent(transcriptWords, { profile: 'family', muteType })
     }
 
     console.log(`[pipeline] Detection (${detectionMethod}) found ${detectedWords.length} profane word(s)`)
@@ -220,6 +238,7 @@ async function runProcessJob(job: ProcessingJob): Promise<void> {
     // ── Stage: processing — ffmpeg render (only if profanity was found) ───────
     let cleanUrl = originalUrl
     let resultStoragePath: string | null = null
+    let verification: VerificationReport | null = null
 
     if (detectedWords.length > 0) {
       await setJobStatus(job.id, 'processing')
@@ -232,13 +251,23 @@ async function runProcessJob(job: ProcessingJob): Promise<void> {
       )
 
       if (s?.vocals && s?.instrumental) {
-        console.log('[pipeline] RENDER PATH = VOCAL-ONLY (mute/warp vocals, instrumental 100% intact)')
+        console.log('[pipeline] RENDER PATH = VOCAL-ONLY (censor vocals, instrumental 100% intact)')
         const vocalsPath = path.join(tmpDir, `bleeep_vocals_${job.song_id}.wav`)
         const instrumentalPath = path.join(tmpDir, `bleeep_instrumental_${job.song_id}.wav`)
         tmpFiles.push(vocalsPath, instrumentalPath)
         await downloadToFile(s.vocals, vocalsPath)
         await downloadToFile(s.instrumental, instrumentalPath)
-        await renderCleanAudio({ words: detectedWords, outputPath, vocalsPath, instrumentalPath })
+        const res = await censorAndVerify({
+          words: detectedWords,
+          outputPath,
+          vocalsPath,
+          instrumentalPath,
+          workDir: tmpDir,
+          tag: job.song_id,
+          snapToVocalEnergy: detectionMethod === 'ai',
+        })
+        detectedWords = res.words
+        verification = res.report
       } else {
         const reason = !s
           ? 'separation failed/unavailable'
@@ -248,7 +277,17 @@ async function runProcessJob(job: ProcessingJob): Promise<void> {
         const inputPath = path.join(tmpDir, `bleeep_input_${job.song_id}${ext}`)
         tmpFiles.push(inputPath)
         await downloadToFile(originalUrl, inputPath)
-        await renderCleanAudio({ words: detectedWords, outputPath, inputPath })
+        // Full-mix fallback: no snapping — the mix's energy valleys are the
+        // band's, not the voice's.
+        const res = await censorAndVerify({
+          words: detectedWords,
+          outputPath,
+          inputPath,
+          workDir: tmpDir,
+          tag: job.song_id,
+        })
+        detectedWords = res.words
+        verification = res.report
       }
 
       // ── Stage: uploading — push the clean render to storage ─────────────────
@@ -289,6 +328,7 @@ async function runProcessJob(job: ProcessingJob): Promise<void> {
       transcript: transcriptWords,
       result_storage_path: resultStoragePath,
     })
+    await persistVerification(job.id, job.song_id, verification)
 
     // Usage accounting: a successful process job counts against the user's
     // monthly quota. Mirrors the original Vercel route's increment-on-success
@@ -339,13 +379,15 @@ async function runReprocessJob(job: ProcessingJob): Promise<void> {
 
     let cleanUrl = originalUrl
     let resultStoragePath: string | null = null
+    let verification: VerificationReport | null = null
+    let finalWords = words
 
     if (words.length > 0) {
       await setJobStatus(job.id, 'processing')
       const outputPath = path.join(tmpDir, `bleeep_repr_out_${job.song_id}.mp3`)
       tmpFiles.push(outputPath)
 
-      // Reuse persisted MVSEP stems when available: mute/warp the vocals only
+      // Reuse persisted MVSEP stems when available: censor the vocals only
       // and recombine with the untouched instrumental. Fall back to full-mix
       // muting for older songs processed before isolation existed.
       if (song.vocals_url && song.instrumental_url) {
@@ -355,7 +397,16 @@ async function runReprocessJob(job: ProcessingJob): Promise<void> {
         console.log('[pipeline] reprocess: reusing persisted MVSEP stems (vocal-only render)')
         await downloadToFile(song.vocals_url, vocalsPath)
         await downloadToFile(song.instrumental_url, instrumentalPath)
-        await renderCleanAudio({ words, outputPath, vocalsPath, instrumentalPath })
+        const res = await censorAndVerify({
+          words,
+          outputPath,
+          vocalsPath,
+          instrumentalPath,
+          workDir: tmpDir,
+          tag: `repr_${job.song_id}`,
+        })
+        finalWords = res.words
+        verification = res.report
       } else {
         if (!originalUrl) throw new Error('reprocess: no stems and no original_url to render from')
         console.log('[pipeline] reprocess: no stems — full-mix render')
@@ -363,7 +414,15 @@ async function runReprocessJob(job: ProcessingJob): Promise<void> {
         const inputPath = path.join(tmpDir, `bleeep_repr_${job.song_id}${ext}`)
         tmpFiles.push(inputPath)
         await downloadToFile(originalUrl, inputPath)
-        await renderCleanAudio({ words, outputPath, inputPath })
+        const res = await censorAndVerify({
+          words,
+          outputPath,
+          inputPath,
+          workDir: tmpDir,
+          tag: `repr_${job.song_id}`,
+        })
+        finalWords = res.words
+        verification = res.report
       }
 
       await setJobStatus(job.id, 'uploading')
@@ -380,18 +439,18 @@ async function runReprocessJob(job: ProcessingJob): Promise<void> {
 
     await supabase
       .from('songs')
-      .update({ clean_url: cleanUrl, words_detected: words, status: 'complete' })
+      .update({ clean_url: cleanUrl, words_detected: finalWords, status: 'complete' })
       .eq('id', job.song_id)
 
     // Contribute the user-confirmed timestamps to the community library.
-    if (words.length > 0) {
+    if (finalWords.length > 0) {
       try {
         const parsed = parseFilename(originalFilename)
         const fingerprint = trackFingerprint(parsed.artist, parsed.track)
         const { error: tsErr } = await supabase.from('song_timestamps').upsert(
           {
             track_fingerprint: fingerprint,
-            timestamps: words,
+            timestamps: finalWords,
             source_user_id: job.user_id,
             confidence_score: 1.0,
           },
@@ -405,10 +464,11 @@ async function runReprocessJob(job: ProcessingJob): Promise<void> {
     }
 
     await setJobStatus(job.id, 'complete', {
-      words_detected: words,
+      words_detected: finalWords,
       result_storage_path: resultStoragePath,
     })
-    console.log(`[pipeline] reprocess done. job=${job.id} song=${job.song_id} words=${words.length}`)
+    await persistVerification(job.id, job.song_id, verification)
+    console.log(`[pipeline] reprocess done. job=${job.id} song=${job.song_id} words=${finalWords.length}`)
   } finally {
     cleanupTmp(tmpFiles)
   }

@@ -9,7 +9,15 @@ import dynamic from 'next/dynamic'
 import Navbar from '@/components/Navbar'
 import { createClient } from '@/lib/supabase/client'
 import { subscribeToJob, type JobRow, type JobSongRow } from '@/lib/jobs-client'
-import type { Profile, Song, DetectedWord, ProcessingStatus, MuteType, DetectionMethod } from '@/types'
+import type {
+  Profile,
+  Song,
+  DetectedWord,
+  ProcessingStatus,
+  MuteType,
+  DetectionMethod,
+  VerificationReport,
+} from '@/types'
 import type { ReviewWord, TranscriptWord } from '@/components/WaveformReview'
 
 const WaveformReview = dynamic(() => import('@/components/WaveformReview'), { ssr: false })
@@ -52,15 +60,49 @@ function censorDisplay(word: string): string {
   return word[0] + '*'.repeat(Math.max(1, word.length - 2)) + word[word.length - 1]
 }
 
+// ── Entity presentation helpers ───────────────────────────────────────────────
+
+/** The Entity's pipeline, as shown in the immersive processing panel. */
+const ENTITY_STAGES: Array<{ keys: string[]; label: string; detail: string }> = [
+  { keys: ['downloading'], label: 'Acquiring audio', detail: 'fetching the original master' },
+  { keys: ['isolating'], label: 'Separating stems', detail: 'lifting vocals off the instrumental' },
+  { keys: ['transcribing'], label: 'Listening', detail: 'hearing every word with timestamps' },
+  { keys: ['processing'], label: 'Censoring + verifying', detail: 'silencing flags, measuring residuals' },
+  { keys: ['uploading'], label: 'Sealing the master', detail: 'exporting your verified clean mix' },
+]
+
+function entityStageIndex(rawStage: string | null): number {
+  if (!rawStage) return -1
+  return ENTITY_STAGES.findIndex((s) => s.keys.includes(rawStage))
+}
+
+const CATEGORY_CHIP: Record<string, { label: string; cls: string }> = {
+  profanity: { label: 'profanity', cls: 'bg-red-500/15 text-red-300 border-red-500/30' },
+  slur: { label: 'slur', cls: 'bg-rose-600/15 text-rose-300 border-rose-500/30' },
+  sexual: { label: 'suggestive', cls: 'bg-pink-500/15 text-pink-300 border-pink-500/30' },
+  substances: { label: 'substances', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+  violence: { label: 'violence', cls: 'bg-orange-500/15 text-orange-300 border-orange-500/30' },
+}
+
+const STYLE_LABEL: Record<string, string> = { mute: 'muted', warp: 'warped', bleep: 'bleeped' }
+
+const MUTE_TYPE_OPTIONS: Array<{ type: MuteType; icon: string; label: string; hint: string }> = [
+  { type: 'warp', icon: '〰️', label: 'Warp', hint: 'muffled wobble over the word' },
+  { type: 'mute', icon: '🔇', label: 'Mute', hint: 'clean silence, music keeps playing' },
+  { type: 'bleep', icon: '🔔', label: 'Bleep', hint: 'classic broadcast tone' },
+]
+
 export default function DashboardClient({ profile, initialSongs, userEmail }: Props) {
   const [songs, setSongs] = useState<Song[]>(initialSongs)
   const [status, setStatus] = useState<ProcessingStatus | null>(null)
+  const [rawStage, setRawStage] = useState<string | null>(null)
   const [muteType, setMuteType] = useState<MuteType>('warp')
   const [result, setResult] = useState<{
     cleanUrl: string
     wordsDetected: DetectedWord[]
     songId: string
     detectionMethod: DetectionMethod
+    verification: VerificationReport | null
   } | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
 
@@ -116,6 +158,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
     (fallbackFilename: string, job: JobRow, song: JobSongRow | null) => {
       jobUnsubRef.current = null
       setIsProcessing(false)
+      setRawStage(null)
 
       const originalUrl = song?.original_url ?? ''
       const originalFilename = song?.original_filename ?? fallbackFilename
@@ -231,7 +274,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
 
         // Worker owns the pipeline now — subscribe for live progress + result.
         jobUnsubRef.current = subscribeToJob(data.jobId, {
-          onStage: (stage) => setStatus(jobStageToStatus(stage)),
+          onStage: (stage) => { setStatus(jobStageToStatus(stage)); setRawStage(stage) },
           onComplete: ({ job, song }) => applyCompletedJob(file.name, job, song),
           onError: (message) => {
             toast.error(message)
@@ -340,7 +383,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
       setScFoundMeta(null)
 
       jobUnsubRef.current = subscribeToJob(data.jobId, {
-        onStage: (stage) => setStatus(jobStageToStatus(stage)),
+        onStage: (stage) => { setStatus(jobStageToStatus(stage)); setRawStage(stage) },
         onComplete: ({ job, song }) => applyCompletedJob(fallbackName, job, song),
         onError: (message) => {
           toast.error(message)
@@ -402,6 +445,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
             wordsDetected: words,
             songId,
             detectionMethod: method,
+            verification: job.verification ?? null,
           })
           setPendingReview(null)
           void refreshSongs()
@@ -466,7 +510,7 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
 
   // ── Render ───────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-[#0F1629]">
+    <div className="min-h-screen bg-[#0F1629] aurora-bg">
       <Navbar />
 
       <div className="max-w-4xl mx-auto px-4 pt-24 pb-16">
@@ -515,47 +559,111 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
             <div className="flex items-center gap-4 mb-4 flex-wrap">
               <h2 className="text-white font-semibold">Clean a new song</h2>
               <div className="flex bg-white/10 rounded-lg p-1 gap-1">
-                {(['warp', 'mute'] as MuteType[]).map((type) => (
+                {MUTE_TYPE_OPTIONS.map(({ type, icon, label, hint }) => (
                   <button
                     key={type}
                     onClick={() => setMuteType(type)}
                     disabled={isProcessing}
+                    title={hint}
                     className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
                       muteType === type
-                        ? 'bg-violet-600 text-white'
+                        ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/30'
                         : 'text-white/50 hover:text-white'
                     }`}
                   >
-                    {type === 'mute' ? '🔇 Mute' : '〰️ Warp'}
+                    {icon} {label}
                   </button>
                 ))}
               </div>
+              <p className="text-white/25 text-xs hidden md:block">
+                {MUTE_TYPE_OPTIONS.find((o) => o.type === muteType)?.hint}
+              </p>
             </div>
 
-            {/* Processing / loading state — shared across file and SoundCloud imports */}
+            {/* Processing — the Entity at work (immersive live pipeline view) */}
             {isProcessing ? (
-              <div className="border-2 border-violet-500/30 bg-violet-600/5 rounded-2xl p-12 text-center">
-                <div className="w-16 h-16 rounded-2xl bg-violet-600/20 flex items-center justify-center mx-auto mb-4">
-                  <div className="w-8 h-8 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
-                </div>
-                <p className="text-white font-medium mb-2">{status?.message ?? 'Importing…'}</p>
-                <div className="max-w-xs mx-auto">
-                  <div className="h-2 bg-white/10 rounded-full overflow-hidden">
-                    <div
-                      className="h-full progress-shimmer rounded-full transition-all duration-1000"
-                      style={{ width: `${status?.progress ?? 5}%` }}
-                    />
+              <div className="glass-deep rounded-2xl p-8 sm:p-10 overflow-hidden relative">
+                <div className="flex flex-col sm:flex-row items-center gap-8">
+                  {/* The Entity orb + equalizer */}
+                  <div className="flex flex-col items-center gap-5 shrink-0">
+                    <div className="entity-orb" aria-hidden />
+                    <div className="flex items-end gap-1 h-8" aria-hidden>
+                      {[0.9, 0.5, 1.1, 0.7, 1.3, 0.6, 1.0, 0.8].map((d, i) => (
+                        <span
+                          key={i}
+                          className="eq-bar h-8"
+                          style={{ animationDuration: `${d}s`, animationDelay: `${i * 0.09}s` }}
+                        />
+                      ))}
+                    </div>
+                    <p className="text-violet-300/80 text-xs font-medium uppercase tracking-[0.2em]">
+                      Entity working
+                    </p>
                   </div>
-                  <div className="flex justify-between text-xs text-white/30 mt-1">
-                    <span>Downloading</span>
-                    <span>Analyzing</span>
-                    <span>Processing</span>
-                    <span>Ready</span>
+
+                  {/* Live stage checklist */}
+                  <div className="flex-1 w-full text-left">
+                    {(() => {
+                      const idx = entityStageIndex(rawStage)
+                      return (
+                        <ol className="space-y-3">
+                          {ENTITY_STAGES.map((s, i) => {
+                            const state = i < idx ? 'done' : i === idx ? 'active' : 'pending'
+                            return (
+                              <li key={s.label} className="flex items-start gap-3">
+                                <span
+                                  className={`mt-0.5 w-5 h-5 rounded-full flex items-center justify-center text-[10px] shrink-0 transition-all ${
+                                    state === 'done'
+                                      ? 'bg-emerald-500/20 text-emerald-300 stage-pop'
+                                      : state === 'active'
+                                      ? 'bg-violet-600 text-white'
+                                      : 'bg-white/5 text-white/20'
+                                  }`}
+                                >
+                                  {state === 'done' ? '✓' : state === 'active' ? (
+                                    <span className="w-2.5 h-2.5 border border-white/70 border-t-transparent rounded-full animate-spin" />
+                                  ) : (
+                                    i + 1
+                                  )}
+                                </span>
+                                <div className="min-w-0">
+                                  <p
+                                    className={`text-sm font-medium transition-colors ${
+                                      state === 'active'
+                                        ? 'text-white'
+                                        : state === 'done'
+                                        ? 'text-white/60'
+                                        : 'text-white/25'
+                                    }`}
+                                  >
+                                    {s.label}
+                                  </p>
+                                  {state === 'active' && (
+                                    <p className="text-violet-300/60 text-xs stage-pop">{s.detail}</p>
+                                  )}
+                                </div>
+                              </li>
+                            )
+                          })}
+                        </ol>
+                      )
+                    })()}
+
+                    {/* Progress bar */}
+                    <div className="mt-6">
+                      <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
+                        <div
+                          className="h-full progress-shimmer rounded-full transition-all duration-1000"
+                          style={{ width: `${status?.progress ?? 5}%` }}
+                        />
+                      </div>
+                      <div className="flex justify-between mt-2">
+                        <p className="text-white/40 text-xs">{status?.message ?? 'Queued…'}</p>
+                        <p className="text-white/25 text-xs">1–3 min depending on song length</p>
+                      </div>
+                    </div>
                   </div>
                 </div>
-                <p className="text-white/30 text-xs mt-3">
-                  This can take 1–3 minutes depending on song length
-                </p>
               </div>
             ) : status?.stage === 'failed' ? (
               <div className="border-2 border-dashed border-red-500/20 rounded-2xl p-12 text-center">
@@ -911,29 +1019,71 @@ export default function DashboardClient({ profile, initialSongs, userEmail }: Pr
               </a>
             </div>
 
+            {/* Entity verification proof */}
+            {result.verification && result.wordsDetected.length > 0 && (
+              <div
+                className={`mb-4 rounded-xl border px-4 py-3 flex items-start gap-3 ${
+                  result.verification.verified
+                    ? 'bg-emerald-500/10 border-emerald-500/30'
+                    : 'bg-amber-500/10 border-amber-500/30'
+                }`}
+              >
+                <span className="text-lg leading-none mt-0.5">
+                  {result.verification.verified ? '🛡️' : '⚠️'}
+                </span>
+                <div>
+                  <p
+                    className={`text-sm font-semibold ${
+                      result.verification.verified ? 'text-emerald-300' : 'text-amber-300'
+                    }`}
+                  >
+                    {result.verification.verified
+                      ? 'Verified clean by the Entity'
+                      : 'Verification flagged residual audio'}
+                  </p>
+                  <p className="text-white/40 text-xs mt-0.5">
+                    {result.verification.windows.filter((w) => w.pass).length}/
+                    {result.verification.windows.length} censor windows measured clean
+                    {' · '}
+                    {result.verification.attempts} render pass
+                    {result.verification.attempts !== 1 ? 'es' : ''}
+                    {result.verification.verified
+                      ? ' · instrumental untouched'
+                      : ' — listen to the flagged spots before publishing'}
+                  </p>
+                </div>
+              </div>
+            )}
+
             {result.wordsDetected.length === 0 ? (
               <p className="text-white/50 text-sm">
-                No profanity detected — your song is already clean!
+                No flagged content — your song is already clean!
               </p>
             ) : (
               <>
                 <p className="text-white/50 text-sm mb-3">
-                  {result.wordsDetected.length} word
-                  {result.wordsDetected.length !== 1 ? 's' : ''} detected and{' '}
-                  {muteType === 'mute' ? 'muted' : 'warped'}:
+                  {result.wordsDetected.length} span
+                  {result.wordsDetected.length !== 1 ? 's' : ''} censored:
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {result.wordsDetected.map((w, i) => (
                     <div
                       key={i}
-                      className="flex items-center gap-3 bg-white/5 rounded-lg px-4 py-2.5"
+                      className="flex items-center gap-3 bg-white/5 rounded-lg px-4 py-2.5 flex-wrap"
                     >
                       <span className="text-red-400 font-mono text-sm font-bold">
                         {censorDisplay(w.word)}
                       </span>
                       <span className="text-white/40 text-xs">{formatTime(w.start)}</span>
+                      {w.category && CATEGORY_CHIP[w.category] && (
+                        <span
+                          className={`text-[10px] px-1.5 py-0.5 rounded-full border ${CATEGORY_CHIP[w.category].cls}`}
+                        >
+                          {CATEGORY_CHIP[w.category].label}
+                        </span>
+                      )}
                       <span className="ml-auto text-xs bg-violet-600/30 text-violet-300 px-2 py-0.5 rounded capitalize">
-                        {w.mute_type === 'mute' ? 'muted' : 'warped'}
+                        {STYLE_LABEL[w.mute_type] ?? w.mute_type}
                       </span>
                     </div>
                   ))}

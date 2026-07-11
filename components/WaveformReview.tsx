@@ -7,12 +7,19 @@ import toast from 'react-hot-toast'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+export type ReviewMuteType = 'mute' | 'warp' | 'bleep'
+
 export type ReviewWord = {
   id: string
   word: string
   start: number
   end: number
-  mute_type: 'mute' | 'warp'
+  mute_type: ReviewMuteType
+  /** Entity metadata — present on AI detections */
+  category?: 'profanity' | 'slur' | 'sexual' | 'substances' | 'violence'
+  severity?: number
+  confidence?: number
+  source?: 'exact' | 'variant' | 'starred' | 'embedded' | 'phrase'
 }
 
 // Full word-level transcript entry (every word AssemblyAI returned, not just profanity)
@@ -28,7 +35,7 @@ interface Props {
   words: ReviewWord[]
   transcript: TranscriptWord[]
   detectionMethod: 'lyrics' | 'ai' | 'community'
-  muteType: 'mute' | 'warp'
+  muteType: ReviewMuteType
   isReprocessing: boolean
   onWordsChange: (words: ReviewWord[]) => void
   onConfirm: () => void
@@ -57,7 +64,25 @@ function censor(word: string): string {
 
 const MUTE_REGION_COLOR = 'rgba(239,68,68,0.22)'
 const WARP_REGION_COLOR = 'rgba(139,92,246,0.30)'
-const regionColor = (t: 'mute' | 'warp') => (t === 'warp' ? WARP_REGION_COLOR : MUTE_REGION_COLOR)
+const BLEEP_REGION_COLOR = 'rgba(245,158,11,0.28)'
+const regionColor = (t: ReviewMuteType) =>
+  t === 'warp' ? WARP_REGION_COLOR : t === 'bleep' ? BLEEP_REGION_COLOR : MUTE_REGION_COLOR
+
+/** Cycle a word's censor style: mute → bleep → warp → mute. */
+const STYLE_CYCLE: Record<ReviewMuteType, ReviewMuteType> = {
+  mute: 'bleep',
+  bleep: 'warp',
+  warp: 'mute',
+}
+const STYLE_ICON: Record<ReviewMuteType, string> = { mute: '🔇', bleep: '🔔', warp: '〰️' }
+
+const CATEGORY_CHIP: Record<string, { label: string; cls: string }> = {
+  profanity: { label: 'profanity', cls: 'bg-red-500/15 text-red-300 border-red-500/30' },
+  slur: { label: 'slur', cls: 'bg-rose-600/15 text-rose-300 border-rose-500/30' },
+  sexual: { label: 'suggestive', cls: 'bg-pink-500/15 text-pink-300 border-pink-500/30' },
+  substances: { label: 'substances', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+  violence: { label: 'violence', cls: 'bg-orange-500/15 text-orange-300 border-orange-500/30' },
+}
 const WS_HEIGHT_NORMAL = 80
 const WS_HEIGHT_EXPANDED = 200
 
@@ -480,6 +505,24 @@ export default function WaveformReview({
     onWordsChange(newWords)
   }
 
+  // Cycle a single word's censor style (mute → bleep → warp) and re-tint its
+  // waveform region to match.
+  const cycleWordStyle = (id: string) => {
+    const word = wordsRef.current.find((w) => w.id === id)
+    if (!word) return
+    pushHistory(wordsRef.current)
+    const next = STYLE_CYCLE[word.mute_type]
+    const region = regionMapRef.current.get(id)
+    if (region) {
+      programmaticRef.current = true
+      region.setOptions({ color: regionColor(next) })
+      programmaticRef.current = false
+    }
+    const newWords = wordsRef.current.map((w) => (w.id === id ? { ...w, mute_type: next } : w))
+    wordsRef.current = newWords
+    onWordsChange(newWords)
+  }
+
   const removeWord = (id: string) => {
     pushHistory(wordsRef.current)
     const region = regionMapRef.current.get(id)
@@ -816,7 +859,7 @@ export default function WaveformReview({
             <div className="flex items-center gap-3 text-xs">
               <span className="flex items-center gap-1.5 text-white/30">
                 <span className="w-2.5 h-2.5 rounded-sm" style={{ background: WARP_REGION_COLOR }} />
-                muted/warped
+                censored
               </span>
               <span className="text-white/30">{transcript.length} words</span>
             </div>
@@ -895,8 +938,37 @@ export default function WaveformReview({
                   {fmt(word.start)} → {fmt(word.end)}
                 </span>
 
+                {/* Entity metadata */}
+                {word.category && CATEGORY_CHIP[word.category] && (
+                  <span
+                    className={`text-[10px] px-1.5 py-0.5 rounded-full border shrink-0 ${CATEGORY_CHIP[word.category].cls}`}
+                    title={
+                      word.confidence
+                        ? `Entity confidence ${Math.round(word.confidence * 100)}%`
+                        : undefined
+                    }
+                  >
+                    {CATEGORY_CHIP[word.category].label}
+                    {typeof word.confidence === 'number' && (
+                      <span className="opacity-60"> · {Math.round(word.confidence * 100)}%</span>
+                    )}
+                  </span>
+                )}
+
                 {/* Controls */}
                 <div className="flex items-center gap-1 ml-auto flex-wrap justify-end">
+
+                  {/* Censor style cycle */}
+                  <button
+                    onClick={() => cycleWordStyle(word.id)}
+                    title={`Style: ${word.mute_type} — click to switch to ${STYLE_CYCLE[word.mute_type]}`}
+                    className={`${btnSm} capitalize`}
+                  >
+                    {STYLE_ICON[word.mute_type]} {word.mute_type}
+                  </button>
+
+                  {/* Divider */}
+                  <span className="w-px h-4 bg-white/10 mx-0.5" />
 
                   {/* Playback: jump + preview */}
                   <button onClick={() => jumpToWord(word)} disabled={!isLoaded} title="Jump to this word" className={btnIcon}>▶</button>
@@ -1007,7 +1079,7 @@ export default function WaveformReview({
                 Processing…
               </>
             ) : words.length > 0 ? (
-              `Finalize & Download (${words.length} mute${words.length !== 1 ? 's' : ''})`
+              `Finalize & Download (${words.length} censored span${words.length !== 1 ? 's' : ''})`
             ) : (
               'Finalize & Download (clean track)'
             )}
