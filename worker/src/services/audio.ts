@@ -45,8 +45,20 @@ const STYLE_RANK: Record<MuteType, number> = { mute: 3, bleep: 2, warp: 1 }
  * Exported for the test harness.
  */
 export function planWindows(words: DetectedWord[], fadeSec: number = FADE_SEC): RenderWindow[] {
-  const sorted = [...words]
-    .filter((w) => w.end > w.start)
+  // Defense in depth: coerce timings to finite numbers and drop anything
+  // malformed. start/end are interpolated into the ffmpeg filtergraph, so a
+  // non-numeric value must never reach it — even though the API layer already
+  // sanitizes client input, the worker refuses to trust it.
+  const sorted = words
+    .map((w) => ({ ...w, start: Number(w.start), end: Number(w.end) }))
+    .filter(
+      (w) =>
+        Number.isFinite(w.start) &&
+        Number.isFinite(w.end) &&
+        w.start >= 0 &&
+        w.end > w.start &&
+        (w.mute_type === 'mute' || w.mute_type === 'warp' || w.mute_type === 'bleep')
+    )
     .sort((a, b) => a.start - b.start || a.end - b.end)
 
   const out: RenderWindow[] = []

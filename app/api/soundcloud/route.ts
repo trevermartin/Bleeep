@@ -74,6 +74,9 @@ export async function POST(request: NextRequest) {
   if (!soundcloudUrl) {
     return NextResponse.json({ error: 'Missing soundcloudUrl' }, { status: 400 })
   }
+  if (typeof muteType !== 'string' || !new Set(['mute', 'warp', 'bleep']).has(muteType)) {
+    return NextResponse.json({ error: 'Invalid muteType' }, { status: 400 })
+  }
 
   const url = soundcloudUrl.trim()
 
@@ -99,10 +102,7 @@ export async function POST(request: NextRequest) {
 
   if (selectErr && selectErr.code !== 'PGRST116') {
     console.error('[soundcloud] Profile SELECT error:', selectErr.code, selectErr.message)
-    return NextResponse.json(
-      { error: `Profile lookup failed: ${selectErr.message} (code: ${selectErr.code})` },
-      { status: 500 }
-    )
+    return NextResponse.json({ error: 'Could not load your account. Please try again.' }, { status: 500 })
   }
 
   let profile = profile0
@@ -114,10 +114,7 @@ export async function POST(request: NextRequest) {
       .single()
     if (insertErr || !newProfile) {
       console.error('[soundcloud] Profile INSERT failed:', insertErr?.message)
-      return NextResponse.json(
-        { error: `Could not create user profile: ${insertErr?.message ?? 'unknown'}` },
-        { status: 500 }
-      )
+      return NextResponse.json({ error: 'Could not initialize your account. Please try again.' }, { status: 500 })
     }
     profile = newProfile
   }
@@ -136,8 +133,9 @@ export async function POST(request: NextRequest) {
 
   // ── Insert placeholder song + enqueue the download-and-process job ──────────
   const songId = uuidv4()
-  const trackTitle = (body.trackTitle ?? '').trim()
-  const artistName = (body.artistName ?? '').trim()
+  const trackTitle = String(body.trackTitle ?? '').trim().slice(0, 200)
+  const artistName = String(body.artistName ?? '').trim().slice(0, 200)
+  const geniusLyrics = body.geniusLyrics ? String(body.geniusLyrics).slice(0, 40000) : null
   // Best-effort display name until the worker fetches the real metadata and
   // backfills original_filename. Falls back to a generic label.
   const placeholderFilename =
@@ -153,7 +151,7 @@ export async function POST(request: NextRequest) {
 
   if (songErr) {
     console.error('[soundcloud] Song INSERT failed:', songErr.message)
-    return NextResponse.json({ error: `Could not create song: ${songErr.message}` }, { status: 500 })
+    return NextResponse.json({ error: 'Could not start import. Please try again.' }, { status: 500 })
   }
 
   const { data: job, error: jobErr } = await adminSupabase
@@ -169,7 +167,7 @@ export async function POST(request: NextRequest) {
       song_name: trackTitle || null,
       artist: artistName || null,
       mute_type: muteType,
-      genius_lyrics: body.geniusLyrics ?? null,
+      genius_lyrics: geniusLyrics,
     })
     .select('id')
     .single()
@@ -177,10 +175,7 @@ export async function POST(request: NextRequest) {
   if (jobErr || !job) {
     console.error('[soundcloud] Job INSERT failed:', jobErr?.message)
     await adminSupabase.from('songs').update({ status: 'failed' }).eq('id', songId)
-    return NextResponse.json(
-      { error: `Could not enqueue processing job: ${jobErr?.message ?? 'unknown'}` },
-      { status: 500 }
-    )
+    return NextResponse.json({ error: 'Could not start import. Please try again.' }, { status: 500 })
   }
 
   console.log(`[soundcloud] Enqueued job ${job.id} for song ${songId} (soundcloud: ${url})`)

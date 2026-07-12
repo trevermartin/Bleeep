@@ -91,6 +91,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ url, artist: foundArtist, title, geniusLyrics: geniusLyrics ?? null })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Search failed'
+    // Log the raw yt-dlp error server-side; never surface it to the client
+    // (it can leak internal paths / tool internals).
     console.error(`[soundcloud-search] FAILED query="${query}":`, message)
     // yt-dlp reports an empty search playlist as an error on some versions
     if (/no.*(entries|results)|playlist.*empty/i.test(message)) {
@@ -99,6 +101,6 @@ export async function POST(request: NextRequest) {
         { status: 404 }
       )
     }
-    return NextResponse.json({ error: `Search failed — ${message}` }, { status: 502 })
+    return NextResponse.json({ error: 'Search failed. Please try again.' }, { status: 502 })
   }
 }

@@ -22,13 +22,16 @@ app.get('/', (_req, res) => {
  */
 app.post('/genius-lyrics', async (req, res) => {
   const secret = process.env.WORKER_SECRET
-  if (secret) {
-    if (req.header('x-worker-secret') !== secret) {
-      res.status(401).json({ error: 'Unauthorized' })
-      return
-    }
-  } else {
-    console.warn('[genius-endpoint] WORKER_SECRET not set — endpoint is UNPROTECTED')
+  // Fail closed: if no shared secret is configured, refuse rather than run as
+  // an open, cost-bearing scraping proxy.
+  if (!secret) {
+    console.error('[genius-endpoint] WORKER_SECRET not set — refusing request (endpoint disabled)')
+    res.status(503).json({ error: 'Service unavailable' })
+    return
+  }
+  if (req.header('x-worker-secret') !== secret) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
   }
 
   const artist = String(req.body?.artist ?? '').trim()
